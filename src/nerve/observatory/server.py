@@ -78,6 +78,8 @@ class ObservatoryHandler(BaseHTTPRequestHandler):
                     payload = store.memecoin_state_summary()
                 elif path == "/api/observatory/chronology":
                     payload = store.chronology_summary()
+                elif path == "/api/observatory/semantic-reflex":
+                    payload = store.semantic_reflex_summary()
                 else:
                     self._json({"error": "endpoint not found"}, HTTPStatus.NOT_FOUND)
                     return

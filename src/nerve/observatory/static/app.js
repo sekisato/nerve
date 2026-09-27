@@ -91,6 +91,9 @@ function renderStatus() {
     ["Chronology observations", summary.chronology?.observation_count],
     ["Complete chronologies", summary.chronology?.complete_count],
     ["Partial chronologies", summary.chronology?.partial_count],
+    ["Semantic contexts", summary.semantic_reflex?.context_count],
+    ["Jev calls", summary.semantic_reflex?.actual_call_count],
+    ["Jev expired", summary.semantic_reflex?.expired_count],
     ["Latest observation", formatTime(summary.latest_observation_at)],
   ];
   clear($("statusGrid")).append(...metrics.map(([label, value]) => metricCard(label, value)));
@@ -161,6 +164,7 @@ function renderDetail() {
     trace.append(node("p", "empty-state", "Choose an observation from the snapshot tape."));
     renderMemecoinState();
     renderChronology();
+    renderSemanticReflex();
     return;
   }
   const snapshot = detail.snapshot;
@@ -235,6 +239,7 @@ function renderDetail() {
   trace.append(...events.map((event) => timelineItem(event.label, event.timestamp, event.detail, event.tone)));
   renderMemecoinState();
   renderChronology();
+  renderSemanticReflex();
 }
 
 const chronologyFactGroups = {
@@ -289,6 +294,64 @@ function renderChronology() {
     const actor = event.user || event.creation_user || event.creator || "";
     timeline.append(timelineItem(String(event.event_type).toUpperCase(), event.block_time,
       `${short(actor, 10, 6)} · slot ${event.slot} · ${event.instruction_path}`, ""));
+  }
+}
+
+function renderSemanticReflex() {
+  const metrics = clear($("semanticMetrics"));
+  const timeline = clear($("semanticTimeline"));
+  const dimensions = clear($("semanticDimensions"));
+  const history = clear($("semanticHistory"));
+  const semantic = state.detail?.semantic_reflex;
+  const latest = semantic?.latest;
+  const context = semantic?.contexts?.find((item) => item.context_id === latest?.context_id)
+    || semantic?.contexts?.at(-1);
+  if (!latest) {
+    $("semanticBadge").textContent = context ? "CONTEXT READY · NO JEV CALL" : "Unavailable";
+    if (context) {
+      metrics.append(metricCard("Context ready", formatTime(context.context_ready_at)),
+        metricCard("Context hash", short(context.context_input_hash, 12, 8)));
+    }
+    dimensions.append(node("p", "empty-state", "No paid Jev semantic result is recorded for this context."));
+    return;
+  }
+  $("semanticBadge").textContent = String(latest.status).toUpperCase();
+  metrics.append(
+    metricCard("Context ready", formatTime(context?.context_ready_at)),
+    metricCard("Jev started", formatTime(latest.started_at)),
+    metricCard("Jev completed", formatTime(latest.completed_at)),
+    metricCard("Latency", displayValue(latest.latency_ms, " ms")),
+    metricCard("Deadline", formatTime(latest.deadline_at)),
+    metricCard("Model", latest.returned_model_id || latest.requested_model_id),
+    metricCard("Question set", latest.question_set_version),
+    metricCard("Sufficiency", latest.overall_data_sufficiency),
+    metricCard("Abstain", latest.abstain),
+  );
+  if (context) {
+    timeline.append(
+      timelineItem("SNAPSHOT", context.snapshot_captured_at, "Frozen snapshot", ""),
+      timelineItem("HARD STATE READY", context.state_ready_at, context.state_id, ""),
+      timelineItem("CHRONOLOGY READY", context.chronology_ready_at, context.chronology_id, ""),
+      timelineItem("CONTEXT READY", context.context_ready_at, short(context.context_input_hash, 12, 8), "success"),
+      timelineItem("JEV START", latest.started_at, latest.requested_model_id, ""),
+      timelineItem("JEV COMPLETE", latest.completed_at, `${latest.latency_ms} ms`, latest.status === "expired" ? "error" : "success"),
+    );
+  }
+  const group = node("section", "fact-group");
+  group.append(node("h3", "", "Independent dimensions"));
+  const table = node("div", "fact-table");
+  for (const item of semantic.dimensions || []) {
+    const row = node("div", "fact-row");
+    row.append(node("span", "fact-name", item.dimension_name),
+      node("strong", "fact-value", item.state),
+      node("span", "fact-status", `CONFIDENCE ${Number(item.semantic_confidence).toFixed(3)}`));
+    table.append(row);
+  }
+  group.append(table);
+  dimensions.append(group);
+  for (const item of semantic.token_history || []) {
+    const vector = (item.dimensions || []).map((value) => `${value.dimension_name} ${value.state}`).join(" · ");
+    history.append(timelineItem("SEMANTIC STATE", item.completed_at, vector, ""));
   }
 }
 
@@ -465,6 +528,8 @@ function renderHealth() {
     healthCard("Arm failures", health.arm_failure_count),
     healthCard("Meme-state failures", health.memestate_failure_count),
     healthCard("Chronology failures", health.chronology_failure_count),
+    healthCard("Context failures", health.semantic_context_failure_count),
+    healthCard("Jev failures", health.jev_reflex_failure_count),
   );
   const events = clear($("healthEvents"));
   const failures = (health.recent_events || []).filter((event) => event.kind !== "capture_ok");

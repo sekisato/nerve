@@ -107,6 +107,7 @@ class ObservatoryReadStore:
             "forward_lab": self.forward_lab(latest),
             "memecoin_state": self.memecoin_state_summary(),
             "chronology": self.chronology_summary(),
+            "semantic_reflex": self.semantic_reflex_summary(),
         }
 
     def recent_snapshots(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -161,6 +162,93 @@ class ObservatoryReadStore:
             "execution_observations": self.execution_observations(snapshot_id),
             "memecoin_state": self.memecoin_state_detail(snapshot_id),
             "chronology": self.chronology_detail(snapshot_id),
+            "semantic_reflex": self.semantic_reflex_detail(snapshot_id),
+        }
+
+    def semantic_reflex_detail(self, snapshot_id: str) -> dict[str, Any]:
+        empty: dict[str, Any] = {"contexts": [], "decisions": [], "latest": None, "dimensions": [], "outcomes": [], "token_history": []}
+        if not self.has_table("semantic_contexts"):
+            return empty
+        contexts = [self._semantic_context_row(row) for row in self.conn.execute(
+            """SELECT * FROM semantic_contexts WHERE snapshot_id=?
+               ORDER BY context_ready_at,rowid""", (snapshot_id,)
+        ).fetchall()]
+        decisions = [self._semantic_decision_row(row) for row in self.conn.execute(
+            """SELECT d.* FROM semantic_reflex_decisions d
+               JOIN semantic_contexts c ON c.context_id=d.context_id
+               WHERE c.snapshot_id=? ORDER BY d.completed_at,d.rowid""", (snapshot_id,)
+        ).fetchall()]
+        if not decisions:
+            return {**empty, "contexts": contexts}
+        latest = decisions[-1]
+        decision_id = str(latest["semantic_decision_id"])
+        dimensions = [self._plain(row) for row in self.conn.execute(
+            """SELECT * FROM semantic_reflex_dimensions WHERE semantic_decision_id=?
+               ORDER BY dimension_name,rowid""", (decision_id,)
+        ).fetchall()]
+        outcomes = [self._plain(row) for row in self.conn.execute(
+            """SELECT * FROM semantic_forward_outcomes WHERE semantic_decision_id=?
+               ORDER BY horizon_seconds,rowid""", (decision_id,)
+        ).fetchall()]
+        token_row = self.conn.execute(
+            "SELECT token,pool FROM observation_snapshots WHERE snapshot_id=?", (snapshot_id,)
+        ).fetchone()
+        token_history: list[dict[str, Any]] = []
+        if token_row is not None:
+            history_rows = self.conn.execute(
+                """SELECT d.*,c.context_ready_at,c.snapshot_id
+                   FROM semantic_reflex_decisions d
+                   JOIN semantic_contexts c ON c.context_id=d.context_id
+                   JOIN observation_snapshots s ON s.snapshot_id=c.snapshot_id
+                   WHERE s.token=? AND s.pool=? AND d.status!='failed'
+                   ORDER BY d.completed_at,d.rowid""", (token_row["token"], token_row["pool"])
+            ).fetchall()
+            for row in history_rows:
+                item = self._semantic_decision_row(row)
+                item["dimensions"] = [self._plain(value) for value in self.conn.execute(
+                    """SELECT dimension_name,state,semantic_confidence
+                       FROM semantic_reflex_dimensions WHERE semantic_decision_id=?
+                       ORDER BY dimension_name""", (row["semantic_decision_id"],)
+                ).fetchall()]
+                token_history.append(item)
+        return {"contexts": contexts, "decisions": decisions, "latest": latest,
+                "dimensions": dimensions, "outcomes": outcomes, "token_history": token_history}
+
+    def _semantic_context_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = self._plain(row)
+        item["payload"] = self._load_json(item.pop("payload_json", None))
+        return item
+
+    def _semantic_decision_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = self._plain(row)
+        item["raw_answer"] = self._load_json(item.pop("raw_answer_json", None))
+        item["abstain"] = bool(item["abstain"]) if item.get("abstain") is not None else None
+        item["model_mismatch"] = bool(item.get("model_mismatch"))
+        return item
+
+    def semantic_reflex_summary(self) -> dict[str, Any]:
+        empty = {"context_count": 0, "decision_count": 0, "actual_call_count": 0,
+                 "completed_count": 0, "expired_count": 0, "failed_count": 0,
+                 "median_latency_ms": None, "p95_latency_ms": None}
+        if not self.has_table("semantic_contexts"):
+            return empty
+        context_count = int(self.conn.execute(
+            "SELECT COUNT(*) AS n FROM semantic_contexts"
+        ).fetchone()["n"])
+        rows = self.conn.execute(
+            "SELECT status,latency_ms FROM semantic_reflex_decisions"
+        ).fetchall()
+        latencies = sorted(int(row["latency_ms"]) for row in rows)
+        p95_index = max(0, int((len(latencies) - 1) * 0.95)) if latencies else 0
+        return {
+            "context_count": context_count,
+            "decision_count": len(rows),
+            "actual_call_count": len(rows),
+            "completed_count": sum(row["status"] in {"completed", "abstained", "insufficient"} for row in rows),
+            "expired_count": sum(row["status"] == "expired" for row in rows),
+            "failed_count": sum(row["status"] == "failed" for row in rows),
+            "median_latency_ms": median(latencies) if latencies else None,
+            "p95_latency_ms": latencies[p95_index] if latencies else None,
         }
 
     def chronology_detail(self, snapshot_id: str) -> dict[str, Any]:
@@ -537,6 +625,8 @@ class ObservatoryReadStore:
                 "arm_failure_count": 0,
                 "memestate_failure_count": 0,
                 "chronology_failure_count": 0,
+                "semantic_context_failure_count": 0,
+                "jev_reflex_failure_count": 0,
                 "failure_count": 0,
                 "latest_failure": None,
                 "recent_events": [],
@@ -578,6 +668,8 @@ class ObservatoryReadStore:
             "arm_failure_count": counts.get("arm_failed", 0),
             "memestate_failure_count": counts.get("memestate_failed", 0),
             "chronology_failure_count": counts.get("chronology_failed", 0),
+            "semantic_context_failure_count": counts.get("semantic_context_failed", 0),
+            "jev_reflex_failure_count": counts.get("jev_reflex_failed", 0),
             "failure_count": failure_count,
             "latest_failure": latest_failure,
             "recent_events": events,
