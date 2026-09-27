@@ -106,6 +106,7 @@ class ObservatoryReadStore:
             "arms": self.arm_comparison(),
             "forward_lab": self.forward_lab(latest),
             "memecoin_state": self.memecoin_state_summary(),
+            "chronology": self.chronology_summary(),
         }
 
     def recent_snapshots(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -159,6 +160,91 @@ class ObservatoryReadStore:
             "latest_forward_outcomes": self.latest_forward_outcomes(snapshot_id),
             "execution_observations": self.execution_observations(snapshot_id),
             "memecoin_state": self.memecoin_state_detail(snapshot_id),
+            "chronology": self.chronology_detail(snapshot_id),
+        }
+
+    def chronology_detail(self, snapshot_id: str) -> dict[str, Any]:
+        if not self.has_table("meme_chronology_observations"):
+            return {"history": [], "latest": None, "facts": [], "events": [], "funding_edges": [], "creator_launches": []}
+        rows = self.conn.execute(
+            """SELECT * FROM meme_chronology_observations WHERE snapshot_id=?
+               ORDER BY ready_at,rowid""", (snapshot_id,)
+        ).fetchall()
+        history = [self._chronology_observation(row) for row in rows]
+        latest_row = self.conn.execute(
+            """SELECT * FROM meme_chronology_observations WHERE snapshot_id=?
+               AND coverage_status IN ('complete_since_creation','partial')
+               ORDER BY ready_at DESC,rowid DESC LIMIT 1""", (snapshot_id,)
+        ).fetchone()
+        if latest_row is None:
+            return {"history": history, "latest": None, "facts": [], "events": [], "funding_edges": [], "creator_launches": []}
+        latest = self._chronology_observation(latest_row)
+        chronology_id = str(latest["chronology_id"])
+        facts = [self._typed_fact(row) for row in self.conn.execute(
+            "SELECT * FROM meme_chronology_facts WHERE chronology_id=? ORDER BY field_name,rowid",
+            (chronology_id,),
+        ).fetchall()]
+        events = [self._json_row(row) for row in self.conn.execute(
+            "SELECT * FROM meme_chronology_events WHERE chronology_id=? ORDER BY slot,instruction_path,rowid",
+            (chronology_id,),
+        ).fetchall()]
+        edges = [self._json_row(row) for row in self.conn.execute(
+            "SELECT * FROM meme_funding_edges WHERE chronology_id=? ORDER BY rowid", (chronology_id,)
+        ).fetchall()]
+        launches = [self._json_row(row) for row in self.conn.execute(
+            "SELECT * FROM creator_launch_evidence WHERE chronology_id=? ORDER BY slot,rowid", (chronology_id,)
+        ).fetchall()]
+        return {"history": history, "latest": latest, "facts": facts, "events": events,
+                "funding_edges": edges, "creator_launches": launches}
+
+    def _chronology_observation(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = self._plain(row)
+        item["sources"] = self._load_json(item.pop("sources_json", None))
+        item["payload"] = self._load_json(item.pop("payload_json", None))
+        return item
+
+    def _json_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = self._plain(row)
+        item["details"] = self._load_json(item.pop("details_json", None))
+        return item
+
+    def _typed_fact(self, row: sqlite3.Row) -> dict[str, Any]:
+        fact = self._json_row(row)
+        kind = fact.get("value_kind")
+        values = {"num": fact.get("value_num"), "text": fact.get("value_text")}
+        if kind == "int":
+            fact["value"] = int(fact["value_int"]) if fact.get("value_int") is not None else None
+        elif kind == "bool":
+            fact["value"] = bool(fact["value_bool"]) if fact.get("value_bool") is not None else None
+        else:
+            fact["value"] = values.get(str(kind))
+        return fact
+
+    def chronology_summary(self) -> dict[str, Any]:
+        empty = {"observation_count": 0, "complete_count": 0, "partial_count": 0,
+                 "failure_count": 0, "median_latency_ms": None, "p95_latency_ms": None,
+                 "creation_reached_count": 0, "truncated_count": 0}
+        if not self.has_table("meme_chronology_observations"):
+            return empty
+        rows = self.conn.execute(
+            "SELECT coverage_status,latency_ms,reached_creation,history_truncated FROM meme_chronology_observations"
+        ).fetchall()
+        latencies = sorted(int(row["latency_ms"]) for row in rows)
+        p95_index = max(0, int((len(latencies) - 1) * 0.95)) if latencies else 0
+        failure_count = 0
+        if self.has_table("measurement_events"):
+            failure_count = int(self.conn.execute(
+                "SELECT COUNT(*) AS n FROM measurement_events WHERE kind='chronology_failed'"
+            ).fetchone()["n"])
+        return {
+            "observation_count": len(rows),
+            "complete_count": sum(row["coverage_status"] == "complete_since_creation" for row in rows),
+            "partial_count": sum(row["coverage_status"] == "partial" for row in rows),
+            "failure_count": failure_count,
+            "median_latency_ms": median(latencies) if latencies else None,
+            "p95_latency_ms": latencies[p95_index] if latencies else None,
+            "creation_reached_count": sum(bool(row["reached_creation"]) for row in rows),
+            "truncated_count": sum(bool(row["history_truncated"]) for row in rows),
         }
 
     def memecoin_state_detail(self, snapshot_id: str) -> dict[str, Any]:
@@ -450,6 +536,7 @@ class ObservatoryReadStore:
                 "outcome_failure_count": 0,
                 "arm_failure_count": 0,
                 "memestate_failure_count": 0,
+                "chronology_failure_count": 0,
                 "failure_count": 0,
                 "latest_failure": None,
                 "recent_events": [],
@@ -490,6 +577,7 @@ class ObservatoryReadStore:
             "outcome_failure_count": counts.get("outcome_failed", 0),
             "arm_failure_count": counts.get("arm_failed", 0),
             "memestate_failure_count": counts.get("memestate_failed", 0),
+            "chronology_failure_count": counts.get("chronology_failed", 0),
             "failure_count": failure_count,
             "latest_failure": latest_failure,
             "recent_events": events,

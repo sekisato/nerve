@@ -148,6 +148,7 @@ class MeasurementEventKind(StrEnum):
     ARM_FAILED = "arm_failed"
     OUTCOME_FAILED = "outcome_failed"
     MEMESTATE_FAILED = "memestate_failed"
+    CHRONOLOGY_FAILED = "chronology_failed"
 
 
 class MeasurementEvent(BaseModel):

@@ -22,6 +22,7 @@ def main(argv: list[str] | None = None) -> int:
             "lab-report",
             "observatory",
             "meme-state",
+            "meme-chronology",
             "kill",
             "run",
         ),
@@ -31,6 +32,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("action", nargs="?", choices=("collect",))
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--snapshot-id")
+    parser.add_argument("--max-signatures", type=int, default=500)
+    parser.add_argument("--funding-buyers", type=int, default=0)
+    parser.add_argument("--creator-history-signatures", type=int, default=0)
     args = parser.parse_args(argv)
     config = NerveConfig.from_env()
     if args.command == "paper-scan":
@@ -69,6 +73,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.action != "collect":
             parser.error("meme-state requires the collect action")
         return _collect_meme_state(config, args.limit, args.snapshot_id)
+    if args.command == "meme-chronology":
+        if args.action != "collect":
+            parser.error("meme-chronology requires the collect action")
+        return _collect_meme_chronology(
+            config,
+            args.limit,
+            args.snapshot_id,
+            args.max_signatures,
+            args.funding_buyers,
+            args.creator_history_signatures,
+        )
     desk = NerveDesk(config)
     try:
         if args.command == "paper-scan":
@@ -164,6 +179,51 @@ def _collect_meme_state(config: NerveConfig, limit: int, snapshot_id: str | None
             state = collector.collect_safely(snapshot)
             if state is not None:
                 results.append(collection_result(state))
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return 0
+    finally:
+        store.close()
+
+
+def _collect_meme_chronology(
+    config: NerveConfig,
+    limit: int,
+    snapshot_id: str | None,
+    max_signatures: int,
+    funding_buyers: int,
+    creator_history_signatures: int,
+) -> int:
+    """Explicit bounded lab workflow; it is not reachable from the live Spine."""
+    from .chronology.collector import MemeChronologyCollector
+    from .chronology.report import collection_result
+    from .store import NerveStore
+
+    config.ensure_runtime_dirs()
+    store = NerveStore(config.db_path)
+    try:
+        if snapshot_id:
+            snapshot = store.get_observation_snapshot(snapshot_id)
+            snapshots = [snapshot] if snapshot is not None else []
+        else:
+            snapshots = [
+                snapshot
+                for snapshot in store.list_observation_snapshots()
+                if snapshot.chain == "solana"
+                and store.latest_meme_chronology(snapshot.snapshot_id) is None
+            ][: max(0, min(limit, 500))]
+        collector = MemeChronologyCollector(store, solana_rpc_url=config.solana_rpc_url)
+        results = []
+        for snapshot in snapshots:
+            if snapshot.chain != "solana":
+                continue
+            item = collector.collect_safely(
+                snapshot,
+                max_signatures=max_signatures,
+                funding_buyers=funding_buyers,
+                creator_history_signatures=creator_history_signatures,
+            )
+            if item is not None:
+                results.append(collection_result(item))
         print(json.dumps(results, indent=2, ensure_ascii=False))
         return 0
     finally:
