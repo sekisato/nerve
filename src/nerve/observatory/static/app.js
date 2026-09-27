@@ -88,6 +88,9 @@ function renderStatus() {
     ["Meme-state failures", summary.memecoin_state?.failure_count],
     ["State median latency", displayValue(summary.memecoin_state?.median_latency_ms, " ms")],
     ["State p95 latency", displayValue(summary.memecoin_state?.p95_latency_ms, " ms")],
+    ["Chronology observations", summary.chronology?.observation_count],
+    ["Complete chronologies", summary.chronology?.complete_count],
+    ["Partial chronologies", summary.chronology?.partial_count],
     ["Latest observation", formatTime(summary.latest_observation_at)],
   ];
   clear($("statusGrid")).append(...metrics.map(([label, value]) => metricCard(label, value)));
@@ -157,6 +160,7 @@ function renderDetail() {
     $("detailStage").textContent = "Unavailable";
     trace.append(node("p", "empty-state", "Choose an observation from the snapshot tape."));
     renderMemecoinState();
+    renderChronology();
     return;
   }
   const snapshot = detail.snapshot;
@@ -230,6 +234,62 @@ function renderDetail() {
   });
   trace.append(...events.map((event) => timelineItem(event.label, event.timestamp, event.detail, event.tone)));
   renderMemecoinState();
+  renderChronology();
+}
+
+const chronologyFactGroups = {
+  Creation: ["creation_signature", "creation_slot", "creation_block_time", "creation_user", "creation_creator", "creation_mint"],
+  Activity: ["observed_buy_event_count", "observed_unique_buyers_count", "observed_sell_event_count", "observed_unique_sellers_count", "unique_buyers_since_creation"],
+  "Early cohort": ["early_cohort_target_n", "early_cohort_actual_n", "early_cohort_cutoff_slot", "early_cohort_wallets", "early_cohort_balance_coverage_pct", "early_cohort_current_supply_pct"],
+  "Same-slot": ["multi_buyer_slot_count", "max_distinct_buyers_same_slot", "buy_events_in_multi_buyer_slots", "multi_buyer_slot_event_share_pct"],
+  Funding: ["funding_probe_enabled", "funding_coverage_pct", "shared_funder_group_count", "creation_user_funded_early_buyer_count", "creation_creator_funded_early_buyer_count"],
+  "Creator history": ["creator_history_probe_enabled", "creator_observed_prior_launch_count", "creator_history_truncated"],
+};
+
+function renderChronology() {
+  const metrics = clear($("chronologyMetrics"));
+  const factsPanel = clear($("chronologyFacts"));
+  const timeline = clear($("chronologyTimeline"));
+  const chronology = state.detail?.chronology;
+  const latest = chronology?.latest;
+  if (!latest) {
+    $("chronologyBadge").textContent = "Unavailable";
+    factsPanel.append(node("p", "empty-state", "No usable chronology collection is recorded for this snapshot."));
+    return;
+  }
+  $("chronologyBadge").textContent = String(latest.coverage_status).toUpperCase();
+  metrics.append(
+    metricCard("Ready", formatTime(latest.ready_at)),
+    metricCard("Source cutoff", formatTime(latest.source_cutoff_at)),
+    metricCard("Signatures", latest.signature_count),
+    metricCard("Transactions", latest.transaction_fetch_count),
+    metricCard("Decode failures", latest.decode_failure_count),
+    metricCard("Creation reached", Boolean(latest.reached_creation)),
+    metricCard("History truncated", Boolean(latest.history_truncated)),
+    metricCard("Attempts", chronology.history?.length || 0),
+  );
+  const byName = new Map((chronology.facts || []).map((fact) => [fact.field_name, fact]));
+  for (const [groupName, names] of Object.entries(chronologyFactGroups)) {
+    const group = node("section", "fact-group");
+    group.append(node("h3", "", groupName));
+    const table = node("div", "fact-table");
+    for (const name of names) {
+      const fact = byName.get(name);
+      if (!fact) continue;
+      const row = node("div", "fact-row");
+      row.append(node("span", "fact-name", name),
+        node("strong", "fact-value", displayValue(fact.value, fact.unit ? ` ${fact.unit}` : "")),
+        node("span", `fact-status status-${fact.status}`, String(fact.status).toUpperCase()));
+      table.append(row);
+    }
+    group.append(table);
+    factsPanel.append(group);
+  }
+  for (const event of chronology.events || []) {
+    const actor = event.user || event.creation_user || event.creator || "";
+    timeline.append(timelineItem(String(event.event_type).toUpperCase(), event.block_time,
+      `${short(actor, 10, 6)} · slot ${event.slot} · ${event.instruction_path}`, ""));
+  }
 }
 
 const factGroups = {
@@ -404,6 +464,7 @@ function renderHealth() {
     healthCard("Outcome failures", health.outcome_failure_count),
     healthCard("Arm failures", health.arm_failure_count),
     healthCard("Meme-state failures", health.memestate_failure_count),
+    healthCard("Chronology failures", health.chronology_failure_count),
   );
   const events = clear($("healthEvents"));
   const failures = (health.recent_events || []).filter((event) => event.kind !== "capture_ok");

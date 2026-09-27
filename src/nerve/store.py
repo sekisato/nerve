@@ -7,6 +7,15 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from .chronology.models import (
+    ChronologyCoverage,
+    ChronologyEvent,
+    ChronologyEventType,
+    CreatorLaunchEvidence,
+    DecodeStatus,
+    FundingEdge,
+    MemeChronologyObservation,
+)
 from .lab.models import (
     DecisionStatus,
     ExecutionObservation,
@@ -194,6 +203,63 @@ class NerveStore:
                 ON memecoin_state_facts(field_name, status);
             CREATE INDEX IF NOT EXISTS idx_memestate_facts_state
                 ON memecoin_state_facts(state_id);
+
+            CREATE TABLE IF NOT EXISTS meme_chronology_observations (
+                chronology_id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL,
+                chronology_version TEXT NOT NULL, started_at TEXT NOT NULL,
+                ready_at TEXT NOT NULL, latency_ms INTEGER NOT NULL,
+                source_cutoff_at TEXT NOT NULL, coverage_status TEXT NOT NULL,
+                history_truncated INTEGER NOT NULL, reached_creation INTEGER NOT NULL,
+                signature_count INTEGER NOT NULL, transaction_fetch_count INTEGER NOT NULL,
+                transaction_unavailable_count INTEGER NOT NULL,
+                unsupported_version_count INTEGER NOT NULL, decode_failure_count INTEGER NOT NULL,
+                decoded_event_count INTEGER NOT NULL, oldest_slot INTEGER, newest_slot INTEGER,
+                oldest_block_time TEXT, newest_block_time TEXT,
+                chronology_hash TEXT NOT NULL, sources_json TEXT NOT NULL, payload_json TEXT NOT NULL,
+                FOREIGN KEY(snapshot_id) REFERENCES observation_snapshots(snapshot_id)
+            );
+            CREATE TABLE IF NOT EXISTS meme_chronology_events (
+                event_id TEXT PRIMARY KEY, chronology_id TEXT NOT NULL, signature TEXT NOT NULL,
+                slot INTEGER NOT NULL, block_time TEXT, instruction_path TEXT NOT NULL,
+                program_id TEXT NOT NULL, venue TEXT NOT NULL, event_type TEXT NOT NULL,
+                user TEXT, mint TEXT, pool TEXT, creator TEXT, creation_user TEXT,
+                amount_token_raw TEXT, amount_quote_raw TEXT,
+                instruction_discriminator TEXT NOT NULL, decode_status TEXT NOT NULL,
+                details_json TEXT NOT NULL,
+                FOREIGN KEY(chronology_id) REFERENCES meme_chronology_observations(chronology_id)
+            );
+            CREATE TABLE IF NOT EXISTS meme_chronology_facts (
+                fact_id TEXT PRIMARY KEY, chronology_id TEXT NOT NULL, field_name TEXT NOT NULL,
+                status TEXT NOT NULL, value_kind TEXT, value_num TEXT, value_int TEXT,
+                value_text TEXT, value_bool INTEGER, unit TEXT, source TEXT,
+                source_observed_at TEXT, fetched_at TEXT, age_ms INTEGER, reason TEXT,
+                details_json TEXT NOT NULL,
+                FOREIGN KEY(chronology_id) REFERENCES meme_chronology_observations(chronology_id)
+            );
+            CREATE TABLE IF NOT EXISTS meme_funding_edges (
+                edge_id TEXT PRIMARY KEY, chronology_id TEXT NOT NULL, target_wallet TEXT NOT NULL,
+                source_wallet TEXT NOT NULL, funding_signature TEXT NOT NULL, slot INTEGER NOT NULL,
+                block_time TEXT, lamports TEXT NOT NULL, seconds_before_first_buy INTEGER NOT NULL,
+                source_kind TEXT NOT NULL, relation_to_creation_user INTEGER,
+                relation_to_creation_creator INTEGER, details_json TEXT NOT NULL,
+                FOREIGN KEY(chronology_id) REFERENCES meme_chronology_observations(chronology_id)
+            );
+            CREATE TABLE IF NOT EXISTS creator_launch_evidence (
+                evidence_id TEXT PRIMARY KEY, chronology_id TEXT NOT NULL, creator TEXT NOT NULL,
+                mint TEXT NOT NULL, creation_signature TEXT NOT NULL, slot INTEGER NOT NULL,
+                block_time TEXT, is_current_mint INTEGER NOT NULL, source TEXT NOT NULL,
+                details_json TEXT NOT NULL,
+                FOREIGN KEY(chronology_id) REFERENCES meme_chronology_observations(chronology_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chronology_snapshot
+                ON meme_chronology_observations(snapshot_id,ready_at);
+            CREATE INDEX IF NOT EXISTS idx_chronology_events
+                ON meme_chronology_events(chronology_id,slot,instruction_path);
+            CREATE INDEX IF NOT EXISTS idx_chronology_facts
+                ON meme_chronology_facts(chronology_id,field_name,status);
+            CREATE INDEX IF NOT EXISTS idx_funding_chronology ON meme_funding_edges(chronology_id);
+            CREATE INDEX IF NOT EXISTS idx_creator_launch_chronology
+                ON creator_launch_evidence(chronology_id);
             """
         )
         self._migrate_forward_outcomes()
@@ -512,6 +578,201 @@ class NerveStore:
             sources_json=str(row["sources_json"]),
             payload_json=str(row["payload_json"]),
             facts=facts,
+        )
+
+    def record_meme_chronology(self, item: MemeChronologyObservation) -> None:
+        if self.get_observation_snapshot(item.snapshot_id) is None:
+            raise ValueError("chronology references an unknown snapshot")
+        self.conn.execute("BEGIN")
+        try:
+            self.conn.execute(
+                """INSERT INTO meme_chronology_observations VALUES(
+                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    item.chronology_id, item.snapshot_id, item.chronology_version,
+                    item.started_at.isoformat(), item.ready_at.isoformat(), item.latency_ms,
+                    item.source_cutoff_at.isoformat(), item.coverage_status.value,
+                    int(item.history_truncated), int(item.reached_creation), item.signature_count,
+                    item.transaction_fetch_count, item.transaction_unavailable_count,
+                    item.unsupported_version_count, item.decode_failure_count,
+                    item.decoded_event_count, item.oldest_slot, item.newest_slot,
+                    item.oldest_block_time.isoformat() if item.oldest_block_time else None,
+                    item.newest_block_time.isoformat() if item.newest_block_time else None,
+                    item.chronology_hash, item.sources_json, item.payload_json,
+                ),
+            )
+            self.conn.executemany(
+                """INSERT INTO meme_chronology_events VALUES(
+                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        event.event_id, item.chronology_id, event.signature, event.slot,
+                        event.block_time.isoformat() if event.block_time else None,
+                        event.instruction_path, event.program_id, event.venue,
+                        event.event_type.value, event.user, event.mint, event.pool, event.creator,
+                        event.creation_user,
+                        str(event.amount_token_raw) if event.amount_token_raw is not None else None,
+                        str(event.amount_quote_raw) if event.amount_quote_raw is not None else None,
+                        event.instruction_discriminator, event.decode_status.value, event.details_json,
+                    )
+                    for event in item.events
+                ],
+            )
+            self.conn.executemany(
+                """INSERT INTO meme_chronology_facts VALUES(
+                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        fact.fact_id, item.chronology_id, fact.field_name, fact.status.value,
+                        fact.value_kind,
+                        str(fact.value_num) if fact.value_num is not None else None,
+                        str(fact.value_int) if fact.value_int is not None else None,
+                        fact.value_text,
+                        int(fact.value_bool) if fact.value_bool is not None else None,
+                        fact.unit, fact.source,
+                        fact.source_observed_at.isoformat() if fact.source_observed_at else None,
+                        fact.fetched_at.isoformat() if fact.fetched_at else None,
+                        fact.age_ms, fact.reason, fact.details_json,
+                    )
+                    for fact in item.facts
+                ],
+            )
+            self.conn.executemany(
+                """INSERT INTO meme_funding_edges VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        edge.edge_id, item.chronology_id, edge.target_wallet, edge.source_wallet,
+                        edge.funding_signature, edge.slot,
+                        edge.block_time.isoformat() if edge.block_time else None,
+                        str(edge.lamports), edge.seconds_before_first_buy, edge.source_kind,
+                        _optional_bool(edge.relation_to_creation_user),
+                        _optional_bool(edge.relation_to_creation_creator), edge.details_json,
+                    )
+                    for edge in item.funding_edges
+                ],
+            )
+            self.conn.executemany(
+                """INSERT INTO creator_launch_evidence VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        launch.evidence_id, item.chronology_id, launch.creator, launch.mint,
+                        launch.creation_signature, launch.slot,
+                        launch.block_time.isoformat() if launch.block_time else None,
+                        int(launch.is_current_mint), launch.source, launch.details_json,
+                    )
+                    for launch in item.creator_launches
+                ],
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def list_meme_chronologies(
+        self, snapshot_id: str | None = None
+    ) -> list[MemeChronologyObservation]:
+        if snapshot_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM meme_chronology_observations ORDER BY ready_at,rowid"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT * FROM meme_chronology_observations WHERE snapshot_id=?
+                   ORDER BY ready_at,rowid""",
+                (snapshot_id,),
+            ).fetchall()
+        return [self._meme_chronology_from_row(row) for row in rows]
+
+    def latest_meme_chronology(self, snapshot_id: str) -> MemeChronologyObservation | None:
+        row = self.conn.execute(
+            """SELECT * FROM meme_chronology_observations WHERE snapshot_id=?
+               AND coverage_status IN ('complete_since_creation','partial')
+               ORDER BY ready_at DESC,rowid DESC LIMIT 1""",
+            (snapshot_id,),
+        ).fetchone()
+        return self._meme_chronology_from_row(row) if row is not None else None
+
+    def _meme_chronology_from_row(self, row: sqlite3.Row) -> MemeChronologyObservation:
+        chronology_id = str(row["chronology_id"])
+        events = tuple(
+            ChronologyEvent(
+                event_id=str(event["event_id"]), signature=str(event["signature"]),
+                slot=int(event["slot"]),
+                block_time=_optional_datetime(event["block_time"]),
+                instruction_path=str(event["instruction_path"]),
+                program_id=str(event["program_id"]), venue=str(event["venue"]),
+                event_type=ChronologyEventType(str(event["event_type"])),
+                user=_optional_str(event["user"]), mint=_optional_str(event["mint"]),
+                pool=_optional_str(event["pool"]), creator=_optional_str(event["creator"]),
+                creation_user=_optional_str(event["creation_user"]),
+                amount_token_raw=_optional_int(event["amount_token_raw"]),
+                amount_quote_raw=_optional_int(event["amount_quote_raw"]),
+                instruction_discriminator=str(event["instruction_discriminator"]),
+                decode_status=DecodeStatus(str(event["decode_status"])),
+                details_json=str(event["details_json"]),
+            )
+            for event in self.conn.execute(
+                "SELECT * FROM meme_chronology_events WHERE chronology_id=? ORDER BY slot,instruction_path,rowid",
+                (chronology_id,),
+            ).fetchall()
+        )
+        facts = tuple(
+            _fact_from_row(fact)
+            for fact in self.conn.execute(
+                "SELECT * FROM meme_chronology_facts WHERE chronology_id=? ORDER BY rowid",
+                (chronology_id,),
+            ).fetchall()
+        )
+        edges = tuple(
+            FundingEdge(
+                edge_id=str(edge["edge_id"]), target_wallet=str(edge["target_wallet"]),
+                source_wallet=str(edge["source_wallet"]),
+                funding_signature=str(edge["funding_signature"]), slot=int(edge["slot"]),
+                block_time=_optional_datetime(edge["block_time"]), lamports=int(edge["lamports"]),
+                seconds_before_first_buy=int(edge["seconds_before_first_buy"]),
+                source_kind=str(edge["source_kind"]),
+                relation_to_creation_user=_db_bool(edge["relation_to_creation_user"]),
+                relation_to_creation_creator=_db_bool(edge["relation_to_creation_creator"]),
+                details_json=str(edge["details_json"]),
+            )
+            for edge in self.conn.execute(
+                "SELECT * FROM meme_funding_edges WHERE chronology_id=? ORDER BY rowid",
+                (chronology_id,),
+            ).fetchall()
+        )
+        launches = tuple(
+            CreatorLaunchEvidence(
+                evidence_id=str(launch["evidence_id"]), creator=str(launch["creator"]),
+                mint=str(launch["mint"]), creation_signature=str(launch["creation_signature"]),
+                slot=int(launch["slot"]), block_time=_optional_datetime(launch["block_time"]),
+                is_current_mint=bool(launch["is_current_mint"]), source=str(launch["source"]),
+                details_json=str(launch["details_json"]),
+            )
+            for launch in self.conn.execute(
+                "SELECT * FROM creator_launch_evidence WHERE chronology_id=? ORDER BY rowid",
+                (chronology_id,),
+            ).fetchall()
+        )
+        return MemeChronologyObservation(
+            chronology_id=chronology_id, snapshot_id=str(row["snapshot_id"]),
+            chronology_version=str(row["chronology_version"]),
+            started_at=datetime.fromisoformat(str(row["started_at"])),
+            ready_at=datetime.fromisoformat(str(row["ready_at"])), latency_ms=int(row["latency_ms"]),
+            source_cutoff_at=datetime.fromisoformat(str(row["source_cutoff_at"])),
+            coverage_status=ChronologyCoverage(str(row["coverage_status"])),
+            history_truncated=bool(row["history_truncated"]),
+            reached_creation=bool(row["reached_creation"]), signature_count=int(row["signature_count"]),
+            transaction_fetch_count=int(row["transaction_fetch_count"]),
+            transaction_unavailable_count=int(row["transaction_unavailable_count"]),
+            unsupported_version_count=int(row["unsupported_version_count"]),
+            decode_failure_count=int(row["decode_failure_count"]),
+            decoded_event_count=int(row["decoded_event_count"]),
+            oldest_slot=_optional_int(row["oldest_slot"]), newest_slot=_optional_int(row["newest_slot"]),
+            oldest_block_time=_optional_datetime(row["oldest_block_time"]),
+            newest_block_time=_optional_datetime(row["newest_block_time"]),
+            chronology_hash=str(row["chronology_hash"]), sources_json=str(row["sources_json"]),
+            payload_json=str(row["payload_json"]), events=events, facts=facts,
+            funding_edges=edges, creator_launches=launches,
         )
 
     def get_observation_snapshot(self, snapshot_id: str) -> ObservationSnapshot | None:
@@ -860,3 +1121,37 @@ class NerveStore:
             key = (str(model_id), str(row["question_version"]), int(row["horizon_seconds"]))
             result.setdefault(key, []).append((float(probability), bool(row["realized_label"])))
         return result
+
+
+def _optional_str(value: object) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _optional_int(value: object) -> int | None:
+    return int(str(value)) if value is not None else None
+
+
+def _optional_datetime(value: object) -> datetime | None:
+    return datetime.fromisoformat(str(value)) if value is not None else None
+
+
+def _optional_bool(value: bool | None) -> int | None:
+    return int(value) if value is not None else None
+
+
+def _db_bool(value: object) -> bool | None:
+    return bool(value) if value is not None else None
+
+
+def _fact_from_row(fact: sqlite3.Row) -> MemecoinStateFact:
+    return MemecoinStateFact(
+        fact_id=str(fact["fact_id"]), field_name=str(fact["field_name"]),
+        status=FactStatus(str(fact["status"])),
+        value_num=Decimal(str(fact["value_num"])) if fact["value_num"] is not None else None,
+        value_int=_optional_int(fact["value_int"]), value_text=_optional_str(fact["value_text"]),
+        value_bool=_db_bool(fact["value_bool"]), unit=_optional_str(fact["unit"]),
+        source=_optional_str(fact["source"]),
+        source_observed_at=_optional_datetime(fact["source_observed_at"]),
+        fetched_at=_optional_datetime(fact["fetched_at"]), age_ms=_optional_int(fact["age_ms"]),
+        reason=_optional_str(fact["reason"]), details_json=str(fact["details_json"]),
+    )

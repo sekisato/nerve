@@ -76,6 +76,8 @@ class ObservatoryHandler(BaseHTTPRequestHandler):
                     payload = store.health()
                 elif path == "/api/observatory/memecoin-state":
                     payload = store.memecoin_state_summary()
+                elif path == "/api/observatory/chronology":
+                    payload = store.chronology_summary()
                 else:
                     self._json({"error": "endpoint not found"}, HTTPStatus.NOT_FOUND)
                     return
