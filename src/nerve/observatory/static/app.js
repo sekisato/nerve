@@ -83,6 +83,11 @@ function renderStatus() {
     ["Expired", summary.expired_decision_count],
     ["Unresolved", summary.unresolved_outcome_count],
     ["Measurement errors", summary.measurement_error_count],
+    ["Meme states", summary.memecoin_state?.observation_count],
+    ["Meme-state successes", summary.memecoin_state?.successful_count],
+    ["Meme-state failures", summary.memecoin_state?.failure_count],
+    ["State median latency", displayValue(summary.memecoin_state?.median_latency_ms, " ms")],
+    ["State p95 latency", displayValue(summary.memecoin_state?.p95_latency_ms, " ms")],
     ["Latest observation", formatTime(summary.latest_observation_at)],
   ];
   clear($("statusGrid")).append(...metrics.map(([label, value]) => metricCard(label, value)));
@@ -151,6 +156,7 @@ function renderDetail() {
     $("traceTitle").textContent = "Select a snapshot";
     $("detailStage").textContent = "Unavailable";
     trace.append(node("p", "empty-state", "Choose an observation from the snapshot tape."));
+    renderMemecoinState();
     return;
   }
   const snapshot = detail.snapshot;
@@ -223,6 +229,79 @@ function renderDetail() {
     return left - right;
   });
   trace.append(...events.map((event) => timelineItem(event.label, event.timestamp, event.detail, event.tone)));
+  renderMemecoinState();
+}
+
+const factGroups = {
+  Market: [
+    "dex_id", "pair_address", "pair_selection_reason", "pair_created_at", "pair_age_ms", "price_native",
+    "price_usd", "liquidity_usd", "liquidity_base", "liquidity_quote", "fdv_usd",
+    "market_cap_usd", "m5_buys", "m5_sells", "h1_buys", "h1_sells", "h24_buys",
+    "h24_sells", "volume_m5", "volume_h1", "volume_h24", "price_change_m5_pct",
+    "price_change_h1_pct", "price_change_h24_pct",
+  ],
+  Ownership: [
+    "token_supply_raw", "token_decimals", "top1_token_accounts_pct",
+    "top5_token_accounts_pct", "top10_token_accounts_pct", "top20_token_accounts_pct",
+    "top20_accounts_owner_coverage_pct", "largest_owner_within_top20_pct",
+    "top5_owners_within_top20_pct", "unique_buyers", "sniper_supply_pct", "bundler_supply_pct",
+  ],
+  Pump: [
+    "bonding_curve_pda", "pump_program_owned", "bonding_curve_exists",
+    "virtual_token_reserves", "virtual_quote_reserves", "real_token_reserves",
+    "real_quote_reserves", "token_total_supply", "curve_complete", "coin_creator",
+    "is_mayhem_mode", "is_cashback_coin", "quote_mint", "creator_fee_bps",
+    "is_holder_reward", "canonical_pumpswap_verified", "pump_lifecycle_state",
+  ],
+};
+
+function renderMemecoinState() {
+  const panel = clear($("memestateGroups"));
+  const metrics = clear($("memestateMetrics"));
+  const memestate = state.detail?.memecoin_state;
+  const latest = memestate?.latest;
+  if (!latest) {
+    $("memestateBadge").textContent = "Unavailable";
+    panel.append(node("p", "empty-state", "No successful memecoin-state collection is recorded for this snapshot."));
+    return;
+  }
+  $("memestateBadge").textContent = String(latest.status).toUpperCase();
+  metrics.append(
+    metricCard("State version", latest.state_version),
+    metricCard("Ready", formatTime(latest.ready_at)),
+    metricCard("Latency", displayValue(latest.latency_ms, " ms")),
+    metricCard("Attempts", memestate.history?.length || 0),
+  );
+  const byName = new Map((memestate.facts || []).map((fact) => [fact.field_name, fact]));
+  for (const [groupName, names] of Object.entries(factGroups)) {
+    const group = node("section", "fact-group");
+    group.append(node("h3", "", groupName));
+    const table = node("div", "fact-table");
+    for (const name of names) {
+      const fact = byName.get(name);
+      if (!fact) continue;
+      const row = node("details", "fact-row");
+      const summary = node("summary");
+      summary.append(
+        node("span", "fact-name", name),
+        node("strong", "fact-value", displayValue(fact.value, fact.unit ? ` ${fact.unit}` : "")),
+        node("span", `fact-status status-${fact.status}`, String(fact.status).toUpperCase()),
+      );
+      const provenance = node("div", "provenance");
+      provenance.append(
+        identityCell("Source", fact.source),
+        identityCell("Source observed", formatTime(fact.source_observed_at)),
+        identityCell("Fetched", formatTime(fact.fetched_at)),
+        identityCell("Age", fact.age_ms === null ? null : `${fact.age_ms} ms`),
+        identityCell("Reason", fact.reason),
+        identityCell("Details", fact.details ? JSON.stringify(fact.details) : null),
+      );
+      row.append(summary, provenance);
+      table.append(row);
+    }
+    group.append(table);
+    panel.append(group);
+  }
 }
 
 function renderForwardLab() {
@@ -324,6 +403,7 @@ function renderHealth() {
     healthCard("Capture failure", health.capture_failure_count),
     healthCard("Outcome failures", health.outcome_failure_count),
     healthCard("Arm failures", health.arm_failure_count),
+    healthCard("Meme-state failures", health.memestate_failure_count),
   );
   const events = clear($("healthEvents"));
   const failures = (health.recent_events || []).filter((event) => event.kind !== "capture_ok");

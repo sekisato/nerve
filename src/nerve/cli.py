@@ -21,12 +21,16 @@ def main(argv: list[str] | None = None) -> int:
             "report",
             "lab-report",
             "observatory",
+            "meme-state",
             "kill",
             "run",
         ),
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=3000)
+    parser.add_argument("action", nargs="?", choices=("collect",))
+    parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--snapshot-id")
     args = parser.parse_args(argv)
     config = NerveConfig.from_env()
     if args.command == "paper-scan":
@@ -61,6 +65,10 @@ def main(argv: list[str] | None = None) -> int:
         return _lab_report(config)
     if args.command == "observatory":
         return _observatory(config, args.host, args.port)
+    if args.command == "meme-state":
+        if args.action != "collect":
+            parser.error("meme-state requires the collect action")
+        return _collect_meme_state(config, args.limit, args.snapshot_id)
     desk = NerveDesk(config)
     try:
         if args.command == "paper-scan":
@@ -128,6 +136,38 @@ def _observatory(config: NerveConfig, host: str, port: int) -> int:
 
     serve(config.db_path, host=host, port=port)
     return 0
+
+
+def _collect_meme_state(config: NerveConfig, limit: int, snapshot_id: str | None) -> int:
+    """Explicit lab workflow; no provider call is reachable from the live Spine."""
+    from .memestate.collector import MemecoinStateCollector
+    from .memestate.report import collection_result
+    from .store import NerveStore
+
+    config.ensure_runtime_dirs()
+    store = NerveStore(config.db_path)
+    try:
+        if snapshot_id:
+            snapshot = store.get_observation_snapshot(snapshot_id)
+            snapshots = [snapshot] if snapshot is not None else []
+        else:
+            snapshots = [
+                snapshot
+                for snapshot in store.list_observation_snapshots()
+                if snapshot.chain == "solana" and store.latest_memecoin_state(snapshot.snapshot_id) is None
+            ][: max(0, min(limit, 500))]
+        collector = MemecoinStateCollector(store, solana_rpc_url=config.solana_rpc_url)
+        results = []
+        for snapshot in snapshots:
+            if snapshot.chain != "solana":
+                continue
+            state = collector.collect_safely(snapshot)
+            if state is not None:
+                results.append(collection_result(state))
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return 0
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

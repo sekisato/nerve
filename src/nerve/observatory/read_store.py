@@ -105,6 +105,7 @@ class ObservatoryReadStore:
             "latest_observation_at": snapshot_row["latest_observation_at"],
             "arms": self.arm_comparison(),
             "forward_lab": self.forward_lab(latest),
+            "memecoin_state": self.memecoin_state_summary(),
         }
 
     def recent_snapshots(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -157,6 +158,116 @@ class ObservatoryReadStore:
             "forward_outcome_events": self.forward_outcome_events(snapshot_id),
             "latest_forward_outcomes": self.latest_forward_outcomes(snapshot_id),
             "execution_observations": self.execution_observations(snapshot_id),
+            "memecoin_state": self.memecoin_state_detail(snapshot_id),
+        }
+
+    def memecoin_state_detail(self, snapshot_id: str) -> dict[str, Any]:
+        if not self.has_table("memecoin_state_observations"):
+            return {"history": [], "latest": None, "facts": []}
+        rows = self.conn.execute(
+            """SELECT * FROM memecoin_state_observations WHERE snapshot_id=?
+               ORDER BY ready_at,rowid""",
+            (snapshot_id,),
+        ).fetchall()
+        history = []
+        for row in rows:
+            item = self._plain(row)
+            item["sources"] = self._load_json(item.pop("sources_json", None))
+            item["payload"] = self._load_json(item.pop("payload_json", None))
+            history.append(item)
+        latest_row = self.conn.execute(
+            """SELECT * FROM memecoin_state_observations
+               WHERE snapshot_id=? AND status IN ('success','partial')
+               ORDER BY ready_at DESC,rowid DESC LIMIT 1""",
+            (snapshot_id,),
+        ).fetchone()
+        if latest_row is None:
+            return {"history": history, "latest": None, "facts": []}
+        latest = self._plain(latest_row)
+        latest["sources"] = self._load_json(latest.pop("sources_json", None))
+        latest["payload"] = self._load_json(latest.pop("payload_json", None))
+        facts = []
+        fact_rows = self.conn.execute(
+            """SELECT * FROM memecoin_state_facts WHERE state_id=?
+               ORDER BY field_name,rowid""",
+            (latest["state_id"],),
+        ).fetchall()
+        for row in fact_rows:
+            fact = self._plain(row)
+            fact["details"] = self._load_json(fact.pop("details_json", None))
+            kind = fact.get("value_kind")
+            if kind == "num":
+                fact["value"] = fact.get("value_num")
+            elif kind == "int":
+                fact["value"] = int(fact["value_int"]) if fact.get("value_int") is not None else None
+            elif kind == "text":
+                fact["value"] = fact.get("value_text")
+            elif kind == "bool":
+                fact["value"] = bool(fact["value_bool"]) if fact.get("value_bool") is not None else None
+            else:
+                fact["value"] = None
+            facts.append(fact)
+        return {"history": history, "latest": latest, "facts": facts}
+
+    def memecoin_state_summary(self) -> dict[str, Any]:
+        if not self.has_table("memecoin_state_observations"):
+            return {
+                "observation_count": 0,
+                "successful_count": 0,
+                "failure_count": 0,
+                "median_latency_ms": None,
+                "p95_latency_ms": None,
+                "field_coverage": [],
+                "lifecycle_counts": {},
+            }
+        rows = self.conn.execute(
+            "SELECT status,latency_ms FROM memecoin_state_observations"
+        ).fetchall()
+        latencies = sorted(int(row["latency_ms"]) for row in rows)
+        p95_index = max(0, int((len(latencies) - 1) * 0.95)) if latencies else 0
+        coverage = [
+            {
+                "field_name": str(row["field_name"]),
+                "observed_count": int(row["observed_count"] or 0),
+                "unavailable_count": int(row["unavailable_count"] or 0),
+                "stale_count": int(row["stale_count"] or 0),
+                "invalid_count": int(row["invalid_count"] or 0),
+                "conflict_count": int(row["conflict_count"] or 0),
+            }
+            for row in self.conn.execute(
+                """SELECT field_name,
+                          SUM(status='observed') AS observed_count,
+                          SUM(status='unavailable') AS unavailable_count,
+                          SUM(status='stale') AS stale_count,
+                          SUM(status='invalid') AS invalid_count,
+                          SUM(status='conflict') AS conflict_count
+                   FROM memecoin_state_facts GROUP BY field_name ORDER BY field_name"""
+            ).fetchall()
+        ]
+        lifecycle_counts = {
+            str(row["value_text"]): int(row["n"])
+            for row in self.conn.execute(
+                """SELECT value_text,COUNT(*) AS n FROM memecoin_state_facts
+                   WHERE field_name='pump_lifecycle_state' AND status='observed'
+                   GROUP BY value_text"""
+            ).fetchall()
+        }
+        event_failure_count = 0
+        if self.has_table("measurement_events"):
+            event_failure_count = int(
+                self.conn.execute(
+                    "SELECT COUNT(*) AS n FROM measurement_events WHERE kind='memestate_failed'"
+                ).fetchone()["n"]
+            )
+        return {
+            "observation_count": len(rows),
+            "successful_count": sum(row["status"] in {"success", "partial"} for row in rows),
+            "failure_count": sum(row["status"] == "failed" for row in rows)
+            + event_failure_count,
+            "median_latency_ms": median(latencies) if latencies else None,
+            "p95_latency_ms": latencies[p95_index] if latencies else None,
+            "field_coverage": coverage,
+            "lifecycle_counts": lifecycle_counts,
         }
 
     def decisions(self, snapshot_id: str) -> list[dict[str, Any]]:
@@ -338,6 +449,7 @@ class ObservatoryReadStore:
                 "capture_failure_count": 0,
                 "outcome_failure_count": 0,
                 "arm_failure_count": 0,
+                "memestate_failure_count": 0,
                 "failure_count": 0,
                 "latest_failure": None,
                 "recent_events": [],
@@ -377,6 +489,7 @@ class ObservatoryReadStore:
             "capture_failure_count": counts.get("capture_failed", 0),
             "outcome_failure_count": counts.get("outcome_failed", 0),
             "arm_failure_count": counts.get("arm_failed", 0),
+            "memestate_failure_count": counts.get("memestate_failed", 0),
             "failure_count": failure_count,
             "latest_failure": latest_failure,
             "recent_events": events,
