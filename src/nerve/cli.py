@@ -13,8 +13,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="NERVE Protocol trading desk")
     parser.add_argument(
         "command",
-        choices=("paper-scan", "chain-check", "preflight", "reconcile", "report", "lab-report", "kill", "run"),
+        choices=(
+            "paper-scan",
+            "chain-check",
+            "preflight",
+            "reconcile",
+            "report",
+            "lab-report",
+            "observatory",
+            "kill",
+            "run",
+        ),
     )
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=3000)
     args = parser.parse_args(argv)
     config = NerveConfig.from_env()
     if args.command == "paper-scan":
@@ -47,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
         return _reconcile(config)
     if args.command == "lab-report":
         return _lab_report(config)
+    if args.command == "observatory":
+        return _observatory(config, args.host, args.port)
     desk = NerveDesk(config)
     try:
         if args.command == "paper-scan":
@@ -106,6 +120,13 @@ def _lab_report(config: NerveConfig) -> int:
         print(json.dumps(build_lab_report(store), indent=2, ensure_ascii=False, sort_keys=True))
     finally:
         store.close()
+    return 0
+
+
+def _observatory(config: NerveConfig, host: str, port: int) -> int:
+    from .observatory.server import serve
+
+    serve(config.db_path, host=host, port=port)
     return 0
 
 

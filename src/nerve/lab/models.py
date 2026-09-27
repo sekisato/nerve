@@ -142,10 +142,34 @@ class OutcomeStatus(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class MeasurementEventKind(StrEnum):
+    CAPTURE_OK = "capture_ok"
+    CAPTURE_FAILED = "capture_failed"
+    ARM_FAILED = "arm_failed"
+    OUTCOME_FAILED = "outcome_failed"
+
+
+class MeasurementEvent(BaseModel):
+    """Append-only health evidence for the measurement sidecar itself."""
+
+    model_config = ConfigDict(frozen=True)
+
+    event_id: str = Field(default_factory=lambda: uuid4().hex)
+    recorded_at: datetime = Field(default_factory=utc_now)
+    kind: MeasurementEventKind
+    stage: str
+    impulse_id: str
+    snapshot_id: str | None = None
+    error_type: str | None = None
+    message: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class ForwardOutcome(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     outcome_id: str = Field(default_factory=lambda: uuid4().hex)
+    recorded_at: datetime = Field(default_factory=utc_now)
     snapshot_id: str
     horizon_seconds: int = Field(gt=0)
     target_at: datetime

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from .lab.arms import ControlArm, LabRunner
-from .lab.models import ObservationSnapshot
+from .lab.models import MeasurementEvent, MeasurementEventKind, ObservationSnapshot
 from .lab.outcomes import pending_outcomes
 from .models import Impulse, NodeType, PortfolioContext, Verdict
 from .protocol import NerveNode
 from .reflexes import Reflex, check_reflexes, default_reflexes
 from .store import NerveStore
+
+logger = logging.getLogger(__name__)
 
 
 class Spine:
@@ -71,13 +74,67 @@ class Spine:
 
     def _capture_measurement(self, impulse: Impulse) -> None:
         """Observe the protocol without changing its verdict or execution path."""
+        snapshot: ObservationSnapshot | None = None
         try:
             snapshot = ObservationSnapshot.capture(impulse)
             self.store.record_observation_snapshot(snapshot)
-            for outcome in pending_outcomes(snapshot):
-                self.store.record_forward_outcome(outcome)
-            self.lab_runner.evaluate(snapshot)
-        except Exception:
-            # Phase 0 measurement is a sidecar. A telemetry/storage failure must
-            # never turn into permission to execute or block core reconciliation.
+        except Exception as exc:
+            self._record_measurement_event(
+                MeasurementEventKind.CAPTURE_FAILED,
+                "post_sentinel_capture",
+                impulse,
+                snapshot,
+                exc,
+            )
             return
+
+        self._record_measurement_event(
+            MeasurementEventKind.CAPTURE_OK,
+            "post_sentinel_capture",
+            impulse,
+            snapshot,
+            None,
+            message="post-SENTINEL snapshot persisted",
+        )
+        try:
+            outcomes = pending_outcomes(snapshot)
+            for outcome in outcomes:
+                self.store.record_forward_outcome(outcome)
+        except Exception as exc:
+            self._record_measurement_event(
+                MeasurementEventKind.OUTCOME_FAILED,
+                "pending_outcomes",
+                impulse,
+                snapshot,
+                exc,
+            )
+        self.lab_runner.evaluate(snapshot)
+
+    def _record_measurement_event(
+        self,
+        kind: MeasurementEventKind,
+        stage: str,
+        impulse: Impulse,
+        snapshot: ObservationSnapshot | None,
+        error: Exception | None,
+        *,
+        message: str | None = None,
+    ) -> None:
+        event = MeasurementEvent(
+            kind=kind,
+            stage=stage,
+            impulse_id=impulse.id,
+            snapshot_id=snapshot.snapshot_id if snapshot else None,
+            error_type=type(error).__name__ if error else None,
+            message=(message or str(error) or kind.value)[:1000],
+            details={"verdict": impulse.verdict.value},
+        )
+        try:
+            self.store.record_measurement_event(event)
+        except Exception:
+            # Core execution remains unchanged, but the final fallback is never silent.
+            logger.exception(
+                "failed to persist measurement health event kind=%s impulse_id=%s",
+                kind.value,
+                impulse.id,
+            )

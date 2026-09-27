@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 from typing import Protocol
 
-from .models import DecisionStatus, ExperimentDecision, ObservationSnapshot, utc_now
+from .models import (
+    DecisionStatus,
+    ExperimentDecision,
+    MeasurementEvent,
+    MeasurementEventKind,
+    ObservationSnapshot,
+    utc_now,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class ExperimentArm(Protocol):
@@ -40,6 +50,8 @@ class ControlArm:
 class DecisionSink(Protocol):
     def record_experiment_decision(self, decision: ExperimentDecision) -> None: ...
 
+    def record_measurement_event(self, event: MeasurementEvent) -> None: ...
+
 
 class LabRunner:
     """Runs independent arms against one exact immutable input."""
@@ -57,9 +69,27 @@ class LabRunner:
         deadline = deadline_at or (utc_now() + timedelta(seconds=30))
         decisions: list[ExperimentDecision] = []
         for arm in self.arms:
-            decision = arm.evaluate(snapshot, deadline)
-            if decision.snapshot_id != snapshot.snapshot_id or decision.input_hash != snapshot.input_hash:
-                raise ValueError("experiment arm did not use the supplied frozen snapshot")
-            self.sink.record_experiment_decision(decision)
-            decisions.append(decision)
+            try:
+                decision = arm.evaluate(snapshot, deadline)
+                if (
+                    decision.snapshot_id != snapshot.snapshot_id
+                    or decision.input_hash != snapshot.input_hash
+                ):
+                    raise ValueError("experiment arm did not use the supplied frozen snapshot")
+                self.sink.record_experiment_decision(decision)
+                decisions.append(decision)
+            except Exception as exc:
+                event = MeasurementEvent(
+                    kind=MeasurementEventKind.ARM_FAILED,
+                    stage=f"arm:{arm.arm_id}",
+                    impulse_id=snapshot.impulse_id,
+                    snapshot_id=snapshot.snapshot_id,
+                    error_type=type(exc).__name__,
+                    message=str(exc)[:1000],
+                    details={"arm_id": arm.arm_id},
+                )
+                try:
+                    self.sink.record_measurement_event(event)
+                except Exception:
+                    logger.exception("failed to persist arm failure measurement event")
         return decisions

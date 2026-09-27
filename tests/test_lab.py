@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -10,7 +11,7 @@ from pydantic import ValidationError
 
 from nerve.agents.executor import ExecutorNode
 from nerve.agents.scanner import ScannerNode
-from nerve.lab.arms import LabRunner
+from nerve.lab.arms import ControlArm, LabRunner
 from nerve.lab.metrics import (
     BinaryPrediction,
     binary_log_loss,
@@ -22,6 +23,7 @@ from nerve.lab.models import (
     DecisionStatus,
     ExecutionObservation,
     ExperimentDecision,
+    MeasurementEventKind,
     ObservationSnapshot,
     OutcomeStatus,
 )
@@ -96,6 +98,30 @@ def test_pool_identity_is_stable_but_observation_identity_is_unique() -> None:
     assert first_snapshot.snapshot_id != second_snapshot.snapshot_id
 
 
+def test_capture_failure_is_audited_without_changing_verdict(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = NerveStore(tmp_path / "health.db")
+    item = candidate()
+    original_verdict = item.verdict
+    spine = Spine(
+        [],
+        store,
+        lambda: PortfolioContext(equity_usd=Decimal("1000")),
+    )
+
+    def fail_snapshot(_snapshot: ObservationSnapshot) -> None:
+        raise sqlite3.OperationalError("fixture write failure")
+
+    monkeypatch.setattr(store, "record_observation_snapshot", fail_snapshot)
+    spine._capture_measurement(item)
+    events = store.list_measurement_events(MeasurementEventKind.CAPTURE_FAILED)
+    assert len(events) == 1
+    assert events[0].error_type == "OperationalError"
+    assert item.verdict is original_verdict
+    store.close()
+
+
 def test_snapshot_payload_is_detached_and_canonical() -> None:
     impulse = candidate()
     snapshot = ObservationSnapshot.capture(
@@ -156,6 +182,28 @@ def test_many_arms_receive_one_exact_snapshot(tmp_path: Any) -> None:
         store.record_experiment_decision(
             decision(snapshot, "C").model_copy(update={"input_hash": "wrong"})
         )
+    store.close()
+
+
+def test_failed_arm_is_audited_and_does_not_hide_other_arms(tmp_path: Any) -> None:
+    class BrokenArm:
+        arm_id = "BROKEN"
+
+        def evaluate(
+            self, snapshot: ObservationSnapshot, deadline_at: datetime
+        ) -> ExperimentDecision:
+            raise RuntimeError("fixture arm failed")
+
+    store = NerveStore(tmp_path / "arm-health.db")
+    item = candidate()
+    store.save(item)
+    snapshot = ObservationSnapshot.capture(item)
+    store.record_observation_snapshot(snapshot)
+    decisions = LabRunner(store, (BrokenArm(), ControlArm())).evaluate(snapshot)
+    assert [item.arm_id for item in decisions] == ["CONTROL"]
+    failures = store.list_measurement_events(MeasurementEventKind.ARM_FAILED)
+    assert len(failures) == 1
+    assert failures[0].details == {"arm_id": "BROKEN"}
     store.close()
 
 

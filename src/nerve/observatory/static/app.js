@@ -1,0 +1,412 @@
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  summary: null,
+  snapshots: [],
+  selectedSnapshotId: null,
+  detail: null,
+  calibration: [],
+  health: null,
+  refreshing: false,
+};
+
+export function displayValue(value, suffix = "") {
+  if (value === null || value === undefined || value === "") return "Unavailable";
+  return `${value}${suffix}`;
+}
+
+function short(value, left = 7, right = 5) {
+  if (value === null || value === undefined || value === "") return "Unavailable";
+  const text = String(value);
+  return text.length > left + right + 3
+    ? `${text.slice(0, left)}…${text.slice(-right)}`
+    : text;
+}
+
+function formatTime(value) {
+  if (value === null || value === undefined || value === "") return "Unavailable";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf())
+    ? String(value)
+    : new Intl.DateTimeFormat(undefined, {
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      }).format(date);
+}
+
+function formatMetric(value, digits = 3, suffix = "") {
+  if (value === null || value === undefined || value === "") return "Unavailable";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value);
+  return `${number.toFixed(digits)}${suffix}`;
+}
+
+function node(tag, className, text) {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text !== undefined) element.textContent = text;
+  return element;
+}
+
+function clear(element) {
+  element.replaceChildren();
+  return element;
+}
+
+async function api(path) {
+  const response = await fetch(`/api/observatory${path}`, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || `Request failed: ${response.status}`);
+  return body;
+}
+
+function metricCard(label, value) {
+  const card = node("div", "metric-card");
+  card.append(node("span", "", label), node("strong", "", displayValue(value)));
+  return card;
+}
+
+function renderStatus() {
+  const summary = state.summary;
+  if (!summary) return;
+  const metrics = [
+    ["Snapshots", summary.snapshot_count],
+    ["Unique tokens", summary.unique_token_count],
+    ["Unique pools", summary.unique_pool_count],
+    ["Decisions", summary.decision_count],
+    ["Expired", summary.expired_decision_count],
+    ["Unresolved", summary.unresolved_outcome_count],
+    ["Measurement errors", summary.measurement_error_count],
+    ["Latest observation", formatTime(summary.latest_observation_at)],
+  ];
+  clear($("statusGrid")).append(...metrics.map(([label, value]) => metricCard(label, value)));
+  const empty = $("emptyState");
+  empty.hidden = summary.snapshot_count !== 0;
+  empty.textContent =
+    "NERVE Phase 0 is installed. No measurement snapshots have been recorded in this database yet. Run `nerve paper-scan` with this DB_PATH to record safe paper observations.";
+  const arms = summary.arms || [];
+  $("armBadge").textContent = arms.length
+    ? arms.map((arm) => arm.display_name).join(" · ")
+    : "NO ARMS RECORDED";
+}
+
+function renderSnapshots() {
+  const tape = clear($("snapshotTape"));
+  $("snapshotCount").textContent = `${state.snapshots.length} rows`;
+  if (!state.snapshots.length) {
+    tape.append(node("p", "empty-state", "No snapshots have been recorded."));
+    return;
+  }
+  for (const snapshot of state.snapshots) {
+    const button = node("button", "snapshot-row");
+    button.type = "button";
+    if (snapshot.snapshot_id === state.selectedSnapshotId) button.classList.add("selected");
+    const identity = node("span");
+    identity.append(
+      node("strong", "", `${formatTime(snapshot.observed_at)} · ${snapshot.chain}`),
+      node("small", "", `${short(snapshot.token)} · pool ${short(snapshot.pool)}`),
+      node("small", "", `snap ${short(snapshot.snapshot_id)} · impulse ${short(snapshot.impulse_id)}`),
+    );
+    const truth = node("span", "tape-state");
+    truth.append(
+      node("strong", `state-${snapshot.outcome_state}`, snapshot.outcome_state.toUpperCase()),
+      node("small", "", `${snapshot.decision_arm_count} arm${snapshot.decision_arm_count === 1 ? "" : "s"}`),
+      node("small", "", snapshot.stage),
+    );
+    button.append(identity, truth);
+    button.addEventListener("click", () => selectSnapshot(snapshot.snapshot_id));
+    tape.append(button);
+  }
+}
+
+function identityCell(label, value) {
+  const cell = node("div", "identity-cell");
+  cell.append(node("span", "", label), node("strong", "", displayValue(value)));
+  return cell;
+}
+
+function timelineItem(label, timestamp, detail, tone = "") {
+  const item = node("article", `timeline-item ${tone}`.trim());
+  const top = node("div", "timeline-top");
+  top.append(node("strong", "", label), node("time", "", formatTime(timestamp)));
+  item.append(top, node("p", "", detail));
+  return item;
+}
+
+function horizonLabel(seconds) {
+  return ({ 60: "+1m", 300: "+5m", 900: "+15m", 1800: "+30m" })[seconds] || `+${seconds}s`;
+}
+
+function renderDetail() {
+  const detail = state.detail;
+  const identity = clear($("snapshotIdentity"));
+  const trace = clear($("decisionTrace"));
+  if (!detail) {
+    $("traceTitle").textContent = "Select a snapshot";
+    $("detailStage").textContent = "Unavailable";
+    trace.append(node("p", "empty-state", "Choose an observation from the snapshot tape."));
+    return;
+  }
+  const snapshot = detail.snapshot;
+  $("traceTitle").textContent = `${snapshot.chain} · ${short(snapshot.token, 10, 6)}`;
+  $("detailStage").textContent = displayValue(snapshot.stage);
+  identity.append(
+    identityCell("Snapshot ID", snapshot.snapshot_id),
+    identityCell("Impulse ID", snapshot.impulse_id),
+    identityCell("Input hash", short(snapshot.input_hash, 12, 8)),
+    identityCell("Pool", short(snapshot.pool, 12, 8)),
+  );
+
+  const events = [
+    {
+      label: "OBSERVED",
+      timestamp: snapshot.observed_at,
+      detail: `Market observation entered NERVE · ${snapshot.chain}`,
+      tone: "",
+    },
+    {
+      label: "SENTINEL SNAPSHOT",
+      timestamp: snapshot.captured_at,
+      detail: `${snapshot.stage} · input ${short(snapshot.input_hash, 12, 8)}`,
+      tone: "success",
+    },
+  ];
+  for (const decision of detail.decisions || []) {
+    events.push({
+      label: `${decision.display_arm} · START`,
+      timestamp: decision.started_at,
+      detail: `${decision.strategy_id} · question ${decision.question_version}`,
+      tone: "",
+    });
+    events.push({
+      label: `${decision.display_arm} · ${String(decision.status).toUpperCase()}`,
+      timestamp: decision.completed_at,
+      detail: `${decision.latency_ms} ms · ${displayValue(decision.reason)}`,
+      tone: decision.status === "expired" || decision.status === "failed" ? "error" : "success",
+    });
+    events.push({
+      label: `${decision.display_arm} · DEADLINE`,
+      timestamp: decision.deadline_at,
+      detail: decision.applied_at
+        ? `Applied ${formatTime(decision.applied_at)}`
+        : decision.status === "abstained"
+          ? "ABSTAINED · no execution instruction"
+          : "No applied timestamp recorded",
+      tone: decision.status === "expired" ? "error" : "",
+    });
+  }
+  for (const execution of detail.execution_observations || []) {
+    events.push({
+      label: `${execution.arm_id} · QUOTE / EXECUTION OBSERVATION`,
+      timestamp: execution.quote_at,
+      detail: `quote ${displayValue(execution.quote_price)} · obtainable ${displayValue(execution.obtainable_quantity)} · status ${execution.status}`,
+      tone: execution.executable_entry === null ? "" : "success",
+    });
+  }
+  for (const outcome of detail.forward_outcome_events || []) {
+    events.push({
+      label: `${horizonLabel(outcome.horizon_seconds)} · ${String(outcome.status).toUpperCase()}`,
+      timestamp: outcome.resolved_at || outcome.target_at,
+      detail: `event recorded ${formatTime(outcome.event_recorded_at)} · return ${formatMetric(outcome.return_pct, 3, "%")} · source ${outcome.source}`,
+      tone: outcome.status === "resolved" ? "success" : "",
+    });
+  }
+  events.sort((a, b) => {
+    const left = Date.parse(a.timestamp || "") || Number.MAX_SAFE_INTEGER;
+    const right = Date.parse(b.timestamp || "") || Number.MAX_SAFE_INTEGER;
+    return left - right;
+  });
+  trace.append(...events.map((event) => timelineItem(event.label, event.timestamp, event.detail, event.tone)));
+}
+
+function renderForwardLab() {
+  const grid = clear($("forwardGrid"));
+  const horizons = state.summary?.forward_lab || [];
+  for (const horizon of horizons) {
+    const card = node("article", "horizon-card");
+    card.append(node("h3", "", horizonLabel(horizon.horizon_seconds)));
+    const values = node("div", "horizon-values");
+    const entries = [
+      ["Resolved", horizon.resolved_count],
+      ["Pending", horizon.pending_count],
+      ["Unavailable", horizon.unavailable_count],
+      ["Mean return", formatMetric(horizon.mean_return_pct, 3, "%")],
+      ["Median return", formatMetric(horizon.median_return_pct, 3, "%")],
+      ["Positive rate", formatMetric(horizon.positive_return_rate, 3)],
+    ];
+    for (const [label, value] of entries) {
+      const block = node("div");
+      block.append(node("span", "", label), node("strong", "", displayValue(value)));
+      values.append(block);
+    }
+    card.append(values);
+    grid.append(card);
+  }
+  const strip = clear($("armComparison"));
+  const arms = state.summary?.arms || [];
+  if (!arms.length) {
+    strip.append(node("span", "arm-note", "No experiment arms have been recorded."));
+    return;
+  }
+  for (const arm of arms) {
+    const note = arm.baseline_kind === "abstention"
+      ? `${arm.display_name} · abstention baseline; no alpha inference`
+      : `${arm.display_name} · ${arm.decision_count} decisions`;
+    strip.append(node("span", "arm-note", note));
+  }
+}
+
+function renderCalibration() {
+  const panel = clear($("calibrationPanel"));
+  if (!state.calibration.length) {
+    panel.append(
+      node("p", "calibration-empty", "No calibrated probability arms have been recorded yet."),
+    );
+    return;
+  }
+  for (const group of state.calibration) {
+    const card = node("article", "calibration-card");
+    card.append(
+      node(
+        "h3",
+        "",
+        `${group.model_id} · ${group.question_version} · ${horizonLabel(group.horizon_seconds)}`,
+      ),
+    );
+    const metrics = node("div", "calibration-metrics");
+    for (const [label, value] of [
+      ["Samples", group.sample_count],
+      ["Brier", formatMetric(group.brier)],
+      ["Log loss", formatMetric(group.log_loss)],
+      ["ECE", formatMetric(group.ece)],
+    ]) {
+      const block = node("div");
+      block.append(node("span", "", label), node("strong", "", displayValue(value)));
+      metrics.append(block);
+    }
+    const chart = node("div", "reliability");
+    chart.setAttribute("aria-label", "Raw model probability and empirical outcome rate bins");
+    for (const bin of group.reliability_bins) {
+      const bar = node("div", "reliability-bar");
+      const probability = bin.mean_probability === null ? 0 : Number(bin.mean_probability);
+      const outcomeRate = bin.positive_rate === null ? 0 : Number(bin.positive_rate);
+      bar.style.height = `${Math.max(3, probability * 100)}%`;
+      bar.style.setProperty("--outcome-height", `${Math.max(0, outcomeRate * 100)}%`);
+      bar.title = bin.count
+        ? `raw probability ${formatMetric(bin.mean_probability)} · empirical outcome rate ${formatMetric(bin.positive_rate)} · n=${bin.count}`
+        : "Empty reliability bin";
+      chart.append(bar);
+    }
+    card.append(metrics, chart);
+    panel.append(card);
+  }
+}
+
+function healthCard(label, value) {
+  const card = node("div", "health-card");
+  card.append(node("span", "", label), node("strong", "", displayValue(value)));
+  return card;
+}
+
+function renderHealth() {
+  const health = state.health;
+  if (!health) return;
+  $("healthBadge").textContent = health.failure_count ? `${health.failure_count} failures` : "No failures recorded";
+  $("healthBadge").classList.toggle("error", Boolean(health.failure_count));
+  clear($("healthGrid")).append(
+    healthCard("Capture success", health.capture_success_count),
+    healthCard("Capture failure", health.capture_failure_count),
+    healthCard("Outcome failures", health.outcome_failure_count),
+    healthCard("Arm failures", health.arm_failure_count),
+  );
+  const events = clear($("healthEvents"));
+  const failures = (health.recent_events || []).filter((event) => event.kind !== "capture_ok");
+  if (!health.available) {
+    events.append(node("p", "empty-state", "Measurement health records are unavailable in this database schema."));
+  } else if (!failures.length) {
+    events.append(node("p", "empty-state", "No measurement failures have been recorded."));
+  } else {
+    for (const event of failures.slice(0, 8)) {
+      const row = node("div", "health-event");
+      row.append(
+        node("time", "", formatTime(event.recorded_at)),
+        node("strong", "", event.kind),
+        node("span", "", `${event.stage} · ${displayValue(event.message)}`),
+      );
+      events.append(row);
+    }
+  }
+}
+
+async function selectSnapshot(snapshotId) {
+  state.selectedSnapshotId = snapshotId;
+  renderSnapshots();
+  try {
+    state.detail = await api(`/snapshot/${encodeURIComponent(snapshotId)}`);
+    renderDetail();
+  } catch (error) {
+    state.detail = null;
+    renderDetail();
+    showConnectionError(error);
+  }
+}
+
+function showConnectionError(error) {
+  $("connectionBadge").textContent = error instanceof Error ? error.message : "Truth store unavailable";
+  $("connectionBadge").classList.add("error");
+}
+
+async function refreshAll() {
+  if (state.refreshing) return;
+  state.refreshing = true;
+  $("refreshButton").disabled = true;
+  try {
+    const [summary, snapshots, calibration, health] = await Promise.all([
+      api("/summary"),
+      api("/snapshots?limit=100"),
+      api("/calibration"),
+      api("/health"),
+    ]);
+    state.summary = summary;
+    state.snapshots = snapshots;
+    state.calibration = calibration;
+    state.health = health;
+    $("connectionBadge").textContent = "Local truth connected";
+    $("connectionBadge").classList.remove("error");
+    if (
+      !state.selectedSnapshotId ||
+      !snapshots.some((snapshot) => snapshot.snapshot_id === state.selectedSnapshotId)
+    ) {
+      state.selectedSnapshotId = snapshots[0]?.snapshot_id || null;
+    }
+    renderStatus();
+    renderSnapshots();
+    renderForwardLab();
+    renderCalibration();
+    renderHealth();
+    if (state.selectedSnapshotId) {
+      state.detail = await api(`/snapshot/${encodeURIComponent(state.selectedSnapshotId)}`);
+    } else {
+      state.detail = null;
+    }
+    renderDetail();
+    $("lastRefresh").textContent = `Refreshed ${formatTime(new Date().toISOString())}`;
+  } catch (error) {
+    showConnectionError(error);
+  } finally {
+    state.refreshing = false;
+    $("refreshButton").disabled = false;
+  }
+}
+
+if (typeof document !== "undefined") {
+  $("refreshButton").addEventListener("click", refreshAll);
+  refreshAll();
+  window.setInterval(refreshAll, 5000);
+}

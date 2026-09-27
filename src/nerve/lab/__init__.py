@@ -7,6 +7,8 @@ from .models import (
     ExecutionObservation,
     ExperimentDecision,
     ForwardOutcome,
+    MeasurementEvent,
+    MeasurementEventKind,
     ObservationSnapshot,
     OutcomeStatus,
 )
@@ -20,6 +22,8 @@ __all__ = [
     "ExperimentDecision",
     "ForwardOutcome",
     "LabRunner",
+    "MeasurementEvent",
+    "MeasurementEventKind",
     "ObservationSnapshot",
     "OutcomeStatus",
 ]
