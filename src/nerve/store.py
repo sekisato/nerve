@@ -11,6 +11,8 @@ from .lab.models import (
     ExecutionObservation,
     ExperimentDecision,
     ForwardOutcome,
+    MeasurementEvent,
+    MeasurementEventKind,
     ObservationSnapshot,
     OutcomeStatus,
     canonical_json,
@@ -88,6 +90,7 @@ class NerveStore:
             );
             CREATE TABLE IF NOT EXISTS forward_outcomes (
                 outcome_id TEXT PRIMARY KEY,
+                recorded_at TEXT NOT NULL,
                 snapshot_id TEXT NOT NULL,
                 horizon_seconds INTEGER NOT NULL,
                 target_at TEXT NOT NULL,
@@ -98,8 +101,7 @@ class NerveStore:
                 realized_label INTEGER,
                 source TEXT NOT NULL,
                 status TEXT NOT NULL,
-                FOREIGN KEY(snapshot_id) REFERENCES observation_snapshots(snapshot_id),
-                UNIQUE(snapshot_id, horizon_seconds, status)
+                FOREIGN KEY(snapshot_id) REFERENCES observation_snapshots(snapshot_id)
             );
             CREATE TABLE IF NOT EXISTS execution_observations (
                 observation_id TEXT PRIMARY KEY,
@@ -118,6 +120,17 @@ class NerveStore:
                 status TEXT NOT NULL,
                 FOREIGN KEY(snapshot_id) REFERENCES observation_snapshots(snapshot_id)
             );
+            CREATE TABLE IF NOT EXISTS measurement_events (
+                event_id TEXT PRIMARY KEY,
+                recorded_at TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                impulse_id TEXT NOT NULL,
+                snapshot_id TEXT,
+                error_type TEXT,
+                message TEXT NOT NULL,
+                details_json TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_snapshots_observed
                 ON observation_snapshots(observed_at);
             CREATE INDEX IF NOT EXISTS idx_snapshots_impulse
@@ -130,9 +143,83 @@ class NerveStore:
                 ON forward_outcomes(status, target_at);
             CREATE INDEX IF NOT EXISTS idx_execution_snapshot
                 ON execution_observations(snapshot_id);
+            CREATE INDEX IF NOT EXISTS idx_measurement_events_recorded
+                ON measurement_events(recorded_at);
+            CREATE INDEX IF NOT EXISTS idx_measurement_events_kind
+                ON measurement_events(kind, recorded_at);
             """
         )
+        self._migrate_forward_outcomes()
         self.conn.commit()
+
+    def _migrate_forward_outcomes(self) -> None:
+        """Rebuild the Phase 0 table without its status uniqueness constraint."""
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(forward_outcomes)").fetchall()
+        }
+        schema_row = self.conn.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='forward_outcomes'"
+        ).fetchone()
+        schema = "" if schema_row is None else str(schema_row["sql"] or "")
+        compact_schema = "".join(schema.lower().split())
+        has_status_unique = "unique(snapshot_id,horizon_seconds,status)" in compact_schema
+        if "recorded_at" in columns and not has_status_unique:
+            return
+
+        old_count = int(
+            self.conn.execute("SELECT COUNT(*) AS n FROM forward_outcomes").fetchone()["n"]
+        )
+        recorded_at_expr = (
+            "l.recorded_at"
+            if "recorded_at" in columns
+            else "COALESCE(l.resolved_at,s.captured_at,l.target_at)"
+        )
+        self.conn.execute("BEGIN")
+        try:
+            self.conn.execute("ALTER TABLE forward_outcomes RENAME TO forward_outcomes_legacy")
+            self.conn.execute(
+                """CREATE TABLE forward_outcomes (
+                       outcome_id TEXT PRIMARY KEY,
+                       recorded_at TEXT NOT NULL,
+                       snapshot_id TEXT NOT NULL,
+                       horizon_seconds INTEGER NOT NULL,
+                       target_at TEXT NOT NULL,
+                       resolved_at TEXT,
+                       reference_price TEXT,
+                       outcome_price TEXT,
+                       return_pct TEXT,
+                       realized_label INTEGER,
+                       source TEXT NOT NULL,
+                       status TEXT NOT NULL,
+                       FOREIGN KEY(snapshot_id) REFERENCES observation_snapshots(snapshot_id)
+                   )"""
+            )
+            self.conn.execute(
+                f"""INSERT INTO forward_outcomes(
+                        outcome_id,recorded_at,snapshot_id,horizon_seconds,target_at,
+                        resolved_at,reference_price,outcome_price,return_pct,
+                        realized_label,source,status
+                    )
+                    SELECT l.outcome_id,{recorded_at_expr},l.snapshot_id,l.horizon_seconds,l.target_at,
+                           l.resolved_at,l.reference_price,l.outcome_price,l.return_pct,
+                           l.realized_label,l.source,l.status
+                    FROM forward_outcomes_legacy l
+                    LEFT JOIN observation_snapshots s ON s.snapshot_id=l.snapshot_id"""
+            )
+            new_count = int(
+                self.conn.execute("SELECT COUNT(*) AS n FROM forward_outcomes").fetchone()["n"]
+            )
+            if new_count != old_count:
+                raise RuntimeError("forward outcome migration row count mismatch")
+            self.conn.execute("DROP TABLE forward_outcomes_legacy")
+            self.conn.execute(
+                "CREATE INDEX idx_outcomes_target ON forward_outcomes(status, target_at)"
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def close(self) -> None:
         self.conn.close()
@@ -357,11 +444,12 @@ class NerveStore:
     def record_forward_outcome(self, outcome: ForwardOutcome) -> None:
         self.conn.execute(
             """INSERT INTO forward_outcomes(
-                   outcome_id,snapshot_id,horizon_seconds,target_at,resolved_at,reference_price,
+                   outcome_id,recorded_at,snapshot_id,horizon_seconds,target_at,resolved_at,reference_price,
                    outcome_price,return_pct,realized_label,source,status
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 outcome.outcome_id,
+                outcome.recorded_at.isoformat(),
                 outcome.snapshot_id,
                 outcome.horizon_seconds,
                 outcome.target_at.isoformat(),
@@ -380,23 +468,27 @@ class NerveStore:
         """Return the latest event for each snapshot/horizon pair."""
         if snapshot_id is None:
             rows = self.conn.execute(
-                """SELECT current.* FROM forward_outcomes current
-                   WHERE current.rowid=(
-                       SELECT MAX(candidate.rowid) FROM forward_outcomes candidate
-                       WHERE candidate.snapshot_id=current.snapshot_id
-                         AND candidate.horizon_seconds=current.horizon_seconds
-                   )
-                   ORDER BY current.target_at,current.horizon_seconds"""
+                """SELECT * FROM (
+                       SELECT event.*,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY snapshot_id,horizon_seconds
+                                  ORDER BY recorded_at DESC,rowid DESC
+                              ) AS event_rank
+                       FROM forward_outcomes event
+                   ) WHERE event_rank=1
+                   ORDER BY target_at,horizon_seconds"""
             ).fetchall()
         else:
             rows = self.conn.execute(
-                """SELECT current.* FROM forward_outcomes current
-                   WHERE current.snapshot_id=? AND current.rowid=(
-                       SELECT MAX(candidate.rowid) FROM forward_outcomes candidate
-                       WHERE candidate.snapshot_id=current.snapshot_id
-                         AND candidate.horizon_seconds=current.horizon_seconds
-                   )
-                   ORDER BY current.horizon_seconds""",
+                """SELECT * FROM (
+                       SELECT event.*,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY snapshot_id,horizon_seconds
+                                  ORDER BY recorded_at DESC,rowid DESC
+                              ) AS event_rank
+                       FROM forward_outcomes event WHERE snapshot_id=?
+                   ) WHERE event_rank=1
+                   ORDER BY horizon_seconds""",
                 (snapshot_id,),
             ).fetchall()
         return [self._outcome_from_row(row) for row in rows]
@@ -404,11 +496,12 @@ class NerveStore:
     def list_forward_outcome_events(self, snapshot_id: str | None = None) -> list[ForwardOutcome]:
         if snapshot_id is None:
             rows = self.conn.execute(
-                "SELECT * FROM forward_outcomes ORDER BY rowid"
+                "SELECT * FROM forward_outcomes ORDER BY recorded_at,rowid"
             ).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT * FROM forward_outcomes WHERE snapshot_id=? ORDER BY rowid",
+                """SELECT * FROM forward_outcomes WHERE snapshot_id=?
+                   ORDER BY recorded_at,rowid""",
                 (snapshot_id,),
             ).fetchall()
         return [self._outcome_from_row(row) for row in rows]
@@ -417,6 +510,7 @@ class NerveStore:
     def _outcome_from_row(row: sqlite3.Row) -> ForwardOutcome:
         return ForwardOutcome(
             outcome_id=str(row["outcome_id"]),
+            recorded_at=datetime.fromisoformat(str(row["recorded_at"])),
             snapshot_id=str(row["snapshot_id"]),
             horizon_seconds=int(row["horizon_seconds"]),
             target_at=datetime.fromisoformat(str(row["target_at"])),
@@ -428,6 +522,54 @@ class NerveStore:
             source=str(row["source"]),
             status=OutcomeStatus(str(row["status"])),
         )
+
+    def record_measurement_event(self, event: MeasurementEvent) -> None:
+        self.conn.execute(
+            """INSERT INTO measurement_events(
+                   event_id,recorded_at,kind,stage,impulse_id,snapshot_id,
+                   error_type,message,details_json
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                event.event_id,
+                event.recorded_at.isoformat(),
+                event.kind.value,
+                event.stage,
+                event.impulse_id,
+                event.snapshot_id,
+                event.error_type,
+                event.message,
+                canonical_json(event.details),
+            ),
+        )
+        self.conn.commit()
+
+    def list_measurement_events(
+        self, kind: MeasurementEventKind | None = None
+    ) -> list[MeasurementEvent]:
+        if kind is None:
+            rows = self.conn.execute(
+                "SELECT * FROM measurement_events ORDER BY recorded_at,rowid"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT * FROM measurement_events WHERE kind=?
+                   ORDER BY recorded_at,rowid""",
+                (kind.value,),
+            ).fetchall()
+        return [
+            MeasurementEvent(
+                event_id=str(row["event_id"]),
+                recorded_at=datetime.fromisoformat(str(row["recorded_at"])),
+                kind=MeasurementEventKind(str(row["kind"])),
+                stage=str(row["stage"]),
+                impulse_id=str(row["impulse_id"]),
+                snapshot_id=(str(row["snapshot_id"]) if row["snapshot_id"] else None),
+                error_type=(str(row["error_type"]) if row["error_type"] else None),
+                message=str(row["message"]),
+                details=json.loads(str(row["details_json"])),
+            )
+            for row in rows
+        ]
 
     def record_execution_observation(self, observation: ExecutionObservation) -> None:
         if observation.executable_entry is not None:
@@ -508,10 +650,20 @@ class NerveStore:
     def calibration_samples(self) -> dict[tuple[str, str, int], list[tuple[float, bool]]]:
         """Return strictly versioned probability/label pairs for reporting."""
         rows = self.conn.execute(
-            """SELECT d.requested_model_id,d.returned_model_id,d.question_version,
+            """WITH latest_outcomes AS (
+                   SELECT ranked.* FROM (
+                       SELECT outcome.*,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY snapshot_id,horizon_seconds
+                                  ORDER BY recorded_at DESC,rowid DESC
+                              ) AS outcome_rank
+                       FROM forward_outcomes outcome
+                   ) ranked WHERE outcome_rank=1
+               )
+               SELECT d.requested_model_id,d.returned_model_id,d.question_version,
                       d.raw_answer_json,o.horizon_seconds,o.realized_label
                FROM experiment_decisions d
-               JOIN forward_outcomes o ON o.snapshot_id=d.snapshot_id
+               JOIN latest_outcomes o ON o.snapshot_id=d.snapshot_id
                WHERE o.status='resolved' AND o.realized_label IS NOT NULL
                  AND d.raw_answer_json IS NOT NULL"""
         ).fetchall()

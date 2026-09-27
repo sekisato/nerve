@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Read-only local instrument panel for NERVE Phase 0 measurement truth." />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%232d2925'/%3E%3Cpath d='M14 43V21h7l11 13V21h7v22h-7L21 30v13z' fill='%23f1c644'/%3E%3Ccircle cx='49' cy='22' r='5' fill='%2374a986'/%3E%3C/svg%3E" />
+    <title>NERVE Observatory</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <main id="app">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="eyebrow">NERVE / PHASE 0</div>
+          <h1>Observatory</h1>
+          <p>Measurement truth, exactly as recorded.</p>
+        </div>
+        <div class="top-actions">
+          <span class="badge badge-readonly"><span class="status-dot"></span>Truth Store · READ ONLY</span>
+          <span id="connectionBadge" class="badge">Connecting</span>
+          <button id="refreshButton" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <section aria-labelledby="runStatusTitle" class="panel run-status">
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">RUN STATUS</div>
+            <h2 id="runStatusTitle">Recorded state</h2>
+          </div>
+          <div id="armBadge" class="badge badge-control">CONTROL · ABSTAIN</div>
+        </div>
+        <div id="statusGrid" class="metric-grid"></div>
+        <p id="emptyState" class="empty-state" hidden></p>
+      </section>
+
+      <section class="workspace">
+        <aside class="panel snapshot-panel" aria-labelledby="snapshotTitle">
+          <div class="section-head compact">
+            <div>
+              <div class="eyebrow">SNAPSHOT TAPE</div>
+              <h2 id="snapshotTitle">Recent observations</h2>
+            </div>
+            <span id="snapshotCount" class="micro-label">0 rows</span>
+          </div>
+          <div class="tape-head" aria-hidden="true">
+            <span>Observed / identity</span><span>Arm / outcome</span>
+          </div>
+          <div id="snapshotTape" class="snapshot-tape"></div>
+        </aside>
+
+        <section class="panel detail-panel" aria-labelledby="traceTitle">
+          <div class="section-head compact">
+            <div>
+              <div class="eyebrow">DECISION TRACE</div>
+              <h2 id="traceTitle">Select a snapshot</h2>
+            </div>
+            <span id="detailStage" class="badge">Unavailable</span>
+          </div>
+          <div id="snapshotIdentity" class="identity-grid"></div>
+          <div id="decisionTrace" class="timeline"></div>
+        </section>
+      </section>
+
+      <section class="lower-grid">
+        <section class="panel" aria-labelledby="forwardTitle">
+          <div class="section-head compact">
+            <div>
+              <div class="eyebrow">FORWARD LAB</div>
+              <h2 id="forwardTitle">Observed horizons</h2>
+            </div>
+            <span class="micro-label">Market outcome · not execution</span>
+          </div>
+          <div id="forwardGrid" class="horizon-grid"></div>
+          <div id="armComparison" class="arm-strip"></div>
+        </section>
+
+        <section class="panel" aria-labelledby="calibrationTitle">
+          <div class="section-head compact">
+            <div>
+              <div class="eyebrow">CALIBRATION</div>
+              <h2 id="calibrationTitle">Probability vs outcome</h2>
+            </div>
+            <span class="micro-label">Versioned groups only</span>
+          </div>
+          <div id="calibrationPanel"></div>
+        </section>
+      </section>
+
+      <section class="panel health-panel" aria-labelledby="healthTitle">
+        <div class="section-head compact">
+          <div>
+            <div class="eyebrow">SYSTEM HEALTH</div>
+            <h2 id="healthTitle">Measurement completeness</h2>
+          </div>
+          <span id="healthBadge" class="badge">Checking</span>
+        </div>
+        <div id="healthGrid" class="health-grid"></div>
+        <div id="healthEvents" class="health-events"></div>
+      </section>
+
+      <footer>
+        <span>NERVE SQLite is the sole truth source.</span>
+        <span id="lastRefresh">Not refreshed</span>
+      </footer>
+    </main>
+  </body>
+</html>

@@ -26,6 +26,7 @@ def build_lab_report(store: Any) -> dict[str, Any]:
     decisions = store.list_experiment_decisions()
     outcomes = store.list_forward_outcomes()
     executions = store.list_execution_observations()
+    measurement_events = store.list_measurement_events()
     latencies = [float(item.latency_ms) for item in decisions]
 
     by_horizon: dict[int, list[float]] = defaultdict(list)
@@ -109,6 +110,12 @@ def build_lab_report(store: Any) -> dict[str, Any]:
         "forward_returns": dict(sorted(forward.items(), key=lambda item: int(item[0]))),
         "calibration": calibration,
         "arm_comparison": arm_comparison,
+        "measurement_health": {
+            "capture_success_count": sum(item.kind.value == "capture_ok" for item in measurement_events),
+            "capture_failure_count": sum(item.kind.value == "capture_failed" for item in measurement_events),
+            "outcome_failure_count": sum(item.kind.value == "outcome_failed" for item in measurement_events),
+            "arm_failure_count": sum(item.kind.value == "arm_failed" for item in measurement_events),
+        },
         "execution_reality": {
             "observation_count": len(executions),
             "quote_availability": len(quoted) / len(executions) if executions else None,
