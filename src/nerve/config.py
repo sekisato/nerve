@@ -68,6 +68,9 @@ class NerveConfig(BaseModel):
     openai_api_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-6-astra"
     openai_reasoning_effort: str = "low"
+    typesafe_api_key: str = Field(default="", repr=False)
+    jev_api_url: str = "https://api.typesafe.ai"
+    jev_model: str = "jev-latest"
     db_path: Path = Path("data/nerve.db")
     log_path: Path = Path("data/nerve.jsonl")
     kill_switch_file: Path = Path("data/KILL_SWITCH")
@@ -176,6 +179,9 @@ class NerveConfig(BaseModel):
             report_interval_sec=int(os.getenv("REPORT_INTERVAL_SEC", "300")),
             openai_api_key=os.getenv("OPENAI_API_KEY", ""),
             openai_model=os.getenv("OPENAI_MODEL", "gpt-6-astra"), openai_reasoning_effort=os.getenv("OPENAI_REASONING_EFFORT", "low"),
+            typesafe_api_key=os.getenv("TYPESAFE_API_KEY", ""),
+            jev_api_url=os.getenv("JEV_API_URL", os.getenv("TYPESAFE_BASE_URL", "https://api.typesafe.ai")),
+            jev_model=os.getenv("JEV_MODEL", os.getenv("TYPESAFE_DEFAULT_MODEL", "jev-latest")),
             db_path=Path(os.getenv("DB_PATH", "data/nerve.db")), log_path=Path(os.getenv("LOG_PATH", "data/nerve.jsonl")),
             kill_switch_file=Path(os.getenv("KILL_SWITCH_FILE", "data/KILL_SWITCH")),
         )

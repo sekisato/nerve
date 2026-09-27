@@ -34,6 +34,15 @@ from .memestate.models import (
     StateStatus,
 )
 from .models import Impulse
+from .semantic.models import (
+    DataSufficiency,
+    SemanticContext,
+    SemanticDecisionStatus,
+    SemanticDimension,
+    SemanticForwardOutcome,
+    SemanticOutcomeStatus,
+    SemanticReflexDecision,
+)
 
 
 class NerveStore:
@@ -260,6 +269,55 @@ class NerveStore:
             CREATE INDEX IF NOT EXISTS idx_funding_chronology ON meme_funding_edges(chronology_id);
             CREATE INDEX IF NOT EXISTS idx_creator_launch_chronology
                 ON creator_launch_evidence(chronology_id);
+
+            CREATE TABLE IF NOT EXISTS semantic_contexts (
+                context_id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL,
+                state_id TEXT NOT NULL, chronology_id TEXT NOT NULL,
+                snapshot_input_hash TEXT NOT NULL, state_hash TEXT NOT NULL,
+                chronology_hash TEXT NOT NULL, context_input_hash TEXT NOT NULL,
+                snapshot_captured_at TEXT NOT NULL, state_ready_at TEXT NOT NULL,
+                chronology_ready_at TEXT NOT NULL, context_ready_at TEXT NOT NULL,
+                context_version TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                FOREIGN KEY(snapshot_id) REFERENCES observation_snapshots(snapshot_id),
+                FOREIGN KEY(state_id) REFERENCES memecoin_state_observations(state_id),
+                FOREIGN KEY(chronology_id) REFERENCES meme_chronology_observations(chronology_id)
+            );
+            CREATE TABLE IF NOT EXISTS semantic_reflex_decisions (
+                semantic_decision_id TEXT PRIMARY KEY, context_id TEXT NOT NULL,
+                question_set_version TEXT NOT NULL, provider TEXT NOT NULL,
+                requested_model_id TEXT NOT NULL, returned_model_id TEXT,
+                started_at TEXT NOT NULL, completed_at TEXT NOT NULL, deadline_at TEXT NOT NULL,
+                deadline_policy_version TEXT NOT NULL, latency_ms INTEGER NOT NULL,
+                status TEXT NOT NULL, overall_data_sufficiency TEXT, abstain INTEGER,
+                raw_answer_json TEXT, validation_error TEXT, model_mismatch INTEGER NOT NULL,
+                previous_context_hash TEXT, seconds_since_previous_semantic_call INTEGER,
+                FOREIGN KEY(context_id) REFERENCES semantic_contexts(context_id)
+            );
+            CREATE TABLE IF NOT EXISTS semantic_reflex_dimensions (
+                dimension_id TEXT PRIMARY KEY, semantic_decision_id TEXT NOT NULL,
+                dimension_name TEXT NOT NULL, state TEXT NOT NULL,
+                semantic_confidence TEXT NOT NULL,
+                FOREIGN KEY(semantic_decision_id) REFERENCES semantic_reflex_decisions(semantic_decision_id)
+            );
+            CREATE TABLE IF NOT EXISTS semantic_forward_outcomes (
+                semantic_outcome_id TEXT PRIMARY KEY, semantic_decision_id TEXT NOT NULL,
+                recorded_at TEXT NOT NULL, horizon_seconds INTEGER NOT NULL,
+                anchor_at TEXT NOT NULL, target_at TEXT NOT NULL, resolved_at TEXT,
+                reference_price TEXT, outcome_price TEXT, return_pct TEXT, status TEXT NOT NULL,
+                FOREIGN KEY(semantic_decision_id) REFERENCES semantic_reflex_decisions(semantic_decision_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_semantic_context_snapshot
+                ON semantic_contexts(snapshot_id,context_ready_at);
+            CREATE INDEX IF NOT EXISTS idx_semantic_context_hash
+                ON semantic_contexts(context_input_hash);
+            CREATE INDEX IF NOT EXISTS idx_semantic_decision_context
+                ON semantic_reflex_decisions(context_id,completed_at);
+            CREATE INDEX IF NOT EXISTS idx_semantic_dedupe
+                ON semantic_reflex_decisions(question_set_version,requested_model_id,status);
+            CREATE INDEX IF NOT EXISTS idx_semantic_dimensions_decision
+                ON semantic_reflex_dimensions(semantic_decision_id,dimension_name);
+            CREATE INDEX IF NOT EXISTS idx_semantic_outcomes_target
+                ON semantic_forward_outcomes(status,target_at);
             """
         )
         self._migrate_forward_outcomes()
@@ -774,6 +832,214 @@ class NerveStore:
             payload_json=str(row["payload_json"]), events=events, facts=facts,
             funding_edges=edges, creator_launches=launches,
         )
+
+    def record_semantic_context(self, context: SemanticContext) -> None:
+        self.conn.execute(
+            """INSERT INTO semantic_contexts VALUES(
+                   ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                context.context_id, context.snapshot_id, context.state_id,
+                context.chronology_id, context.snapshot_input_hash, context.state_hash,
+                context.chronology_hash, context.context_input_hash,
+                context.snapshot_captured_at.isoformat(), context.state_ready_at.isoformat(),
+                context.chronology_ready_at.isoformat(), context.context_ready_at.isoformat(),
+                context.context_version, context.payload_json, context.created_at.isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def semantic_context_by_hash(self, context_input_hash: str) -> SemanticContext | None:
+        row = self.conn.execute(
+            """SELECT * FROM semantic_contexts WHERE context_input_hash=?
+               ORDER BY created_at,rowid LIMIT 1""", (context_input_hash,)
+        ).fetchone()
+        return self._semantic_context_from_row(row) if row is not None else None
+
+    def list_semantic_contexts(self, snapshot_id: str | None = None) -> list[SemanticContext]:
+        if snapshot_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM semantic_contexts ORDER BY context_ready_at,rowid"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT * FROM semantic_contexts WHERE snapshot_id=?
+                   ORDER BY context_ready_at,rowid""", (snapshot_id,)
+            ).fetchall()
+        return [self._semantic_context_from_row(row) for row in rows]
+
+    @staticmethod
+    def _semantic_context_from_row(row: sqlite3.Row) -> SemanticContext:
+        return SemanticContext(
+            context_id=str(row["context_id"]), snapshot_id=str(row["snapshot_id"]),
+            state_id=str(row["state_id"]), chronology_id=str(row["chronology_id"]),
+            snapshot_input_hash=str(row["snapshot_input_hash"]), state_hash=str(row["state_hash"]),
+            chronology_hash=str(row["chronology_hash"]), context_input_hash=str(row["context_input_hash"]),
+            snapshot_captured_at=datetime.fromisoformat(str(row["snapshot_captured_at"])),
+            state_ready_at=datetime.fromisoformat(str(row["state_ready_at"])),
+            chronology_ready_at=datetime.fromisoformat(str(row["chronology_ready_at"])),
+            context_ready_at=datetime.fromisoformat(str(row["context_ready_at"])),
+            context_version=str(row["context_version"]), payload_json=str(row["payload_json"]),
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+        )
+
+    def record_semantic_decision(
+        self,
+        decision: SemanticReflexDecision,
+        outcomes: list[SemanticForwardOutcome],
+    ) -> None:
+        self.conn.execute("BEGIN")
+        try:
+            self.conn.execute(
+                """INSERT INTO semantic_reflex_decisions VALUES(
+                       ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    decision.semantic_decision_id, decision.context_id,
+                    decision.question_set_version, decision.provider,
+                    decision.requested_model_id, decision.returned_model_id,
+                    decision.started_at.isoformat(), decision.completed_at.isoformat(),
+                    decision.deadline_at.isoformat(), decision.deadline_policy_version,
+                    decision.latency_ms, decision.status.value,
+                    decision.overall_data_sufficiency.value
+                    if decision.overall_data_sufficiency else None,
+                    _optional_bool(decision.abstain), decision.raw_answer_json,
+                    decision.validation_error, int(decision.model_mismatch),
+                    decision.previous_context_hash,
+                    decision.seconds_since_previous_semantic_call,
+                ),
+            )
+            self.conn.executemany(
+                "INSERT INTO semantic_reflex_dimensions VALUES(?,?,?,?,?)",
+                [
+                    (
+                        item.dimension_id, decision.semantic_decision_id,
+                        item.dimension_name, item.state, str(item.semantic_confidence),
+                    )
+                    for item in decision.dimensions
+                ],
+            )
+            self.conn.executemany(
+                """INSERT INTO semantic_forward_outcomes VALUES(
+                       ?,?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        item.semantic_outcome_id, decision.semantic_decision_id,
+                        item.recorded_at.isoformat(), item.horizon_seconds,
+                        item.anchor_at.isoformat(), item.target_at.isoformat(),
+                        item.resolved_at.isoformat() if item.resolved_at else None,
+                        item.reference_price, item.outcome_price, item.return_pct,
+                        item.status.value,
+                    )
+                    for item in outcomes
+                ],
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def reusable_semantic_decision(
+        self, context_input_hash: str, question_set_version: str, model: str
+    ) -> SemanticReflexDecision | None:
+        row = self.conn.execute(
+            """SELECT d.* FROM semantic_reflex_decisions d
+               JOIN semantic_contexts c ON c.context_id=d.context_id
+               WHERE c.context_input_hash=? AND d.question_set_version=?
+                 AND d.requested_model_id=? AND d.status!='failed'
+               ORDER BY d.completed_at DESC,d.rowid DESC LIMIT 1""",
+            (context_input_hash, question_set_version, model),
+        ).fetchone()
+        return self._semantic_decision_from_row(row) if row is not None else None
+
+    def latest_semantic_call_for_token(self, token: str) -> tuple[str, datetime] | None:
+        row = self.conn.execute(
+            """SELECT c.context_input_hash,d.started_at
+               FROM semantic_reflex_decisions d
+               JOIN semantic_contexts c ON c.context_id=d.context_id
+               JOIN observation_snapshots s ON s.snapshot_id=c.snapshot_id
+               WHERE s.token=? ORDER BY d.started_at DESC,d.rowid DESC LIMIT 1""",
+            (token,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["context_input_hash"]), datetime.fromisoformat(str(row["started_at"]))
+
+    def list_semantic_decisions(
+        self, snapshot_id: str | None = None
+    ) -> list[SemanticReflexDecision]:
+        if snapshot_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM semantic_reflex_decisions ORDER BY started_at,rowid"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT d.* FROM semantic_reflex_decisions d
+                   JOIN semantic_contexts c ON c.context_id=d.context_id
+                   WHERE c.snapshot_id=? ORDER BY d.started_at,d.rowid""", (snapshot_id,)
+            ).fetchall()
+        return [self._semantic_decision_from_row(row) for row in rows]
+
+    def _semantic_decision_from_row(self, row: sqlite3.Row) -> SemanticReflexDecision:
+        dimension_rows = self.conn.execute(
+            """SELECT * FROM semantic_reflex_dimensions WHERE semantic_decision_id=?
+               ORDER BY dimension_name,rowid""", (row["semantic_decision_id"],)
+        ).fetchall()
+        return SemanticReflexDecision(
+            semantic_decision_id=str(row["semantic_decision_id"]),
+            context_id=str(row["context_id"]), question_set_version=str(row["question_set_version"]),
+            provider=str(row["provider"]), requested_model_id=str(row["requested_model_id"]),
+            returned_model_id=_optional_str(row["returned_model_id"]),
+            started_at=datetime.fromisoformat(str(row["started_at"])),
+            completed_at=datetime.fromisoformat(str(row["completed_at"])),
+            deadline_at=datetime.fromisoformat(str(row["deadline_at"])),
+            deadline_policy_version=str(row["deadline_policy_version"]),
+            latency_ms=int(row["latency_ms"]), status=SemanticDecisionStatus(str(row["status"])),
+            overall_data_sufficiency=(
+                DataSufficiency(str(row["overall_data_sufficiency"]))
+                if row["overall_data_sufficiency"] is not None else None
+            ),
+            abstain=_db_bool(row["abstain"]), raw_answer_json=_optional_str(row["raw_answer_json"]),
+            validation_error=_optional_str(row["validation_error"]),
+            model_mismatch=bool(row["model_mismatch"]),
+            previous_context_hash=_optional_str(row["previous_context_hash"]),
+            seconds_since_previous_semantic_call=_optional_int(row["seconds_since_previous_semantic_call"]),
+            dimensions=tuple(
+                SemanticDimension(
+                    dimension_id=str(item["dimension_id"]),
+                    dimension_name=str(item["dimension_name"]), state=str(item["state"]),
+                    semantic_confidence=float(item["semantic_confidence"]),
+                )
+                for item in dimension_rows
+            ),
+        )
+
+    def list_semantic_forward_outcomes(
+        self, semantic_decision_id: str | None = None
+    ) -> list[SemanticForwardOutcome]:
+        if semantic_decision_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM semantic_forward_outcomes ORDER BY target_at,rowid"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT * FROM semantic_forward_outcomes WHERE semantic_decision_id=?
+                   ORDER BY target_at,rowid""", (semantic_decision_id,)
+            ).fetchall()
+        return [
+            SemanticForwardOutcome(
+                semantic_outcome_id=str(row["semantic_outcome_id"]),
+                semantic_decision_id=str(row["semantic_decision_id"]),
+                recorded_at=datetime.fromisoformat(str(row["recorded_at"])),
+                horizon_seconds=int(row["horizon_seconds"]),
+                anchor_at=datetime.fromisoformat(str(row["anchor_at"])),
+                target_at=datetime.fromisoformat(str(row["target_at"])),
+                resolved_at=_optional_datetime(row["resolved_at"]),
+                reference_price=_optional_str(row["reference_price"]),
+                outcome_price=_optional_str(row["outcome_price"]),
+                return_pct=_optional_str(row["return_pct"]),
+                status=SemanticOutcomeStatus(str(row["status"])),
+            )
+            for row in rows
+        ]
 
     def get_observation_snapshot(self, snapshot_id: str) -> ObservationSnapshot | None:
         row = self.conn.execute(

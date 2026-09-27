@@ -149,6 +149,8 @@ class MeasurementEventKind(StrEnum):
     OUTCOME_FAILED = "outcome_failed"
     MEMESTATE_FAILED = "memestate_failed"
     CHRONOLOGY_FAILED = "chronology_failed"
+    SEMANTIC_CONTEXT_FAILED = "semantic_context_failed"
+    JEV_REFLEX_FAILED = "jev_reflex_failed"
 
 
 class MeasurementEvent(BaseModel):

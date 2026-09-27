@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
             "observatory",
             "meme-state",
             "meme-chronology",
+            "jev-reflex",
             "kill",
             "run",
         ),
@@ -35,6 +36,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-signatures", type=int, default=500)
     parser.add_argument("--funding-buyers", type=int, default=0)
     parser.add_argument("--creator-history-signatures", type=int, default=0)
+    parser.add_argument("--live-jev", action="store_true")
+    parser.add_argument("--deadline-ms", type=int, default=2000)
+    parser.add_argument("--min-recall-seconds", type=int, default=60)
     args = parser.parse_args(argv)
     config = NerveConfig.from_env()
     if args.command == "paper-scan":
@@ -83,6 +87,17 @@ def main(argv: list[str] | None = None) -> int:
             args.max_signatures,
             args.funding_buyers,
             args.creator_history_signatures,
+        )
+    if args.command == "jev-reflex":
+        if args.action != "collect":
+            parser.error("jev-reflex requires the collect action")
+        return _collect_jev_reflex(
+            config,
+            args.limit,
+            args.snapshot_id,
+            args.live_jev,
+            args.deadline_ms,
+            args.min_recall_seconds,
         )
     desk = NerveDesk(config)
     try:
@@ -224,6 +239,56 @@ def _collect_meme_chronology(
             )
             if item is not None:
                 results.append(collection_result(item))
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return 0
+    finally:
+        store.close()
+
+
+def _collect_jev_reflex(
+    config: NerveConfig,
+    limit: int,
+    snapshot_id: str | None,
+    live_jev: bool,
+    deadline_ms: int,
+    min_recall_seconds: int,
+) -> int:
+    """Explicit lab workflow. Dry mode freezes contexts without spending Jev credits."""
+    from .semantic.collector import SemanticReflexCollector
+    from .semantic.provider import TypeSafeJevProvider
+    from .store import NerveStore
+
+    config.ensure_runtime_dirs()
+    store = NerveStore(config.db_path)
+    try:
+        if snapshot_id:
+            snapshot = store.get_observation_snapshot(snapshot_id)
+            snapshots = [snapshot] if snapshot is not None else []
+        else:
+            snapshots = [
+                item
+                for item in store.list_observation_snapshots()
+                if item.chain == "solana"
+                and store.latest_memecoin_state(item.snapshot_id) is not None
+                and store.latest_meme_chronology(item.snapshot_id) is not None
+            ][: max(0, min(limit, 500))]
+        provider = (
+            TypeSafeJevProvider(config.typesafe_api_key, base_url=config.jev_api_url)
+            if live_jev and config.typesafe_api_key
+            else None
+        )
+        collector = SemanticReflexCollector(
+            store, provider=provider, requested_model=config.jev_model
+        )
+        results = [
+            collector.collect(
+                item,
+                live_jev=live_jev,
+                deadline_ms=deadline_ms,
+                min_recall_seconds=min_recall_seconds,
+            )
+            for item in snapshots
+        ]
         print(json.dumps(results, indent=2, ensure_ascii=False))
         return 0
     finally:
