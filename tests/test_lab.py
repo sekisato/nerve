@@ -277,6 +277,11 @@ def test_rejected_after_sentinel_candidate_keeps_snapshot_and_can_resolve_outcom
     resolved = DeterministicResolver(Decimal("10"), {60: Decimal("11")}).resolve(pending)
     store.record_forward_outcome(resolved)
     assert store.list_forward_outcomes(snapshots[0].snapshot_id)[0].return_pct == Decimal("10.0")
+    events = store.list_forward_outcome_events(snapshots[0].snapshot_id)
+    assert [item.status for item in events if item.horizon_seconds == 60] == [
+        OutcomeStatus.PENDING,
+        OutcomeStatus.RESOLVED,
+    ]
     store.close()
 
 

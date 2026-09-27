@@ -42,7 +42,13 @@ class DeterministicResolver:
     def resolve(self, outcome: ForwardOutcome) -> ForwardOutcome:
         price = self.prices.get(outcome.horizon_seconds)
         if price is None:
-            return outcome.model_copy(update={"status": OutcomeStatus.UNAVAILABLE, "source": "deterministic"})
+            return ForwardOutcome(
+                snapshot_id=outcome.snapshot_id,
+                horizon_seconds=outcome.horizon_seconds,
+                target_at=outcome.target_at,
+                source="deterministic",
+                status=OutcomeStatus.UNAVAILABLE,
+            )
         change = (price / self.reference_price - Decimal("1")) * Decimal("100")
         return ForwardOutcome(
             snapshot_id=outcome.snapshot_id,

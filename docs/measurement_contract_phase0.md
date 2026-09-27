@@ -22,10 +22,12 @@ capture point は SENTINEL の `process()` 完了後、ANALYST 前の post-SENTI
 
 - `observation_snapshots`: frozen post-SENTINEL input
 - `experiment_decisions`: arm、model、question version、raw answer、decision clock
-- `forward_outcomes`: 60 / 300 / 900 / 1800 秒の market outcome
+- `forward_outcomes`: 60 / 300 / 900 / 1800 秒の market outcome event
 - `execution_observations`: quote、取得可能数量、fee、impact、execution result
 
 欠損値は `NULL` のまま保持する。quote や価格が取れない場合に 0 を書かない。未解決 horizon は `pending` または `unavailable` であり、架空の return や label を持たない。
+
+計測テーブルへの書き込みは追記であり、既存の計測行を上書きしない。forward outcome の解決も `pending` 行を更新せず、同じ snapshot / horizon に `resolved` event を追加する。query API は各 horizon の最新 event を返す。
 
 ## レポート
 

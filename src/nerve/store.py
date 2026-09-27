@@ -87,6 +87,7 @@ class NerveStore:
                 UNIQUE(snapshot_id, arm_id)
             );
             CREATE TABLE IF NOT EXISTS forward_outcomes (
+                outcome_id TEXT PRIMARY KEY,
                 snapshot_id TEXT NOT NULL,
                 horizon_seconds INTEGER NOT NULL,
                 target_at TEXT NOT NULL,
@@ -97,8 +98,8 @@ class NerveStore:
                 realized_label INTEGER,
                 source TEXT NOT NULL,
                 status TEXT NOT NULL,
-                PRIMARY KEY(snapshot_id, horizon_seconds),
-                FOREIGN KEY(snapshot_id) REFERENCES observation_snapshots(snapshot_id)
+                FOREIGN KEY(snapshot_id) REFERENCES observation_snapshots(snapshot_id),
+                UNIQUE(snapshot_id, horizon_seconds, status)
             );
             CREATE TABLE IF NOT EXISTS execution_observations (
                 observation_id TEXT PRIMARY KEY,
@@ -356,19 +357,11 @@ class NerveStore:
     def record_forward_outcome(self, outcome: ForwardOutcome) -> None:
         self.conn.execute(
             """INSERT INTO forward_outcomes(
-                   snapshot_id,horizon_seconds,target_at,resolved_at,reference_price,
+                   outcome_id,snapshot_id,horizon_seconds,target_at,resolved_at,reference_price,
                    outcome_price,return_pct,realized_label,source,status
-               ) VALUES(?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(snapshot_id,horizon_seconds) DO UPDATE SET
-                   resolved_at=excluded.resolved_at,
-                   reference_price=excluded.reference_price,
-                   outcome_price=excluded.outcome_price,
-                   return_pct=excluded.return_pct,
-                   realized_label=excluded.realized_label,
-                   source=excluded.source,
-                   status=excluded.status
-               WHERE forward_outcomes.status!='resolved'""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (
+                outcome.outcome_id,
                 outcome.snapshot_id,
                 outcome.horizon_seconds,
                 outcome.target_at.isoformat(),
@@ -384,13 +377,38 @@ class NerveStore:
         self.conn.commit()
 
     def list_forward_outcomes(self, snapshot_id: str | None = None) -> list[ForwardOutcome]:
+        """Return the latest event for each snapshot/horizon pair."""
         if snapshot_id is None:
             rows = self.conn.execute(
-                "SELECT * FROM forward_outcomes ORDER BY target_at,horizon_seconds"
+                """SELECT current.* FROM forward_outcomes current
+                   WHERE current.rowid=(
+                       SELECT MAX(candidate.rowid) FROM forward_outcomes candidate
+                       WHERE candidate.snapshot_id=current.snapshot_id
+                         AND candidate.horizon_seconds=current.horizon_seconds
+                   )
+                   ORDER BY current.target_at,current.horizon_seconds"""
             ).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT * FROM forward_outcomes WHERE snapshot_id=? ORDER BY horizon_seconds",
+                """SELECT current.* FROM forward_outcomes current
+                   WHERE current.snapshot_id=? AND current.rowid=(
+                       SELECT MAX(candidate.rowid) FROM forward_outcomes candidate
+                       WHERE candidate.snapshot_id=current.snapshot_id
+                         AND candidate.horizon_seconds=current.horizon_seconds
+                   )
+                   ORDER BY current.horizon_seconds""",
+                (snapshot_id,),
+            ).fetchall()
+        return [self._outcome_from_row(row) for row in rows]
+
+    def list_forward_outcome_events(self, snapshot_id: str | None = None) -> list[ForwardOutcome]:
+        if snapshot_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM forward_outcomes ORDER BY rowid"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM forward_outcomes WHERE snapshot_id=? ORDER BY rowid",
                 (snapshot_id,),
             ).fetchall()
         return [self._outcome_from_row(row) for row in rows]
@@ -398,6 +416,7 @@ class NerveStore:
     @staticmethod
     def _outcome_from_row(row: sqlite3.Row) -> ForwardOutcome:
         return ForwardOutcome(
+            outcome_id=str(row["outcome_id"]),
             snapshot_id=str(row["snapshot_id"]),
             horizon_seconds=int(row["horizon_seconds"]),
             target_at=datetime.fromisoformat(str(row["target_at"])),

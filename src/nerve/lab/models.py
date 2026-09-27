@@ -145,6 +145,7 @@ class OutcomeStatus(StrEnum):
 class ForwardOutcome(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    outcome_id: str = Field(default_factory=lambda: uuid4().hex)
     snapshot_id: str
     horizon_seconds: int = Field(gt=0)
     target_at: datetime
