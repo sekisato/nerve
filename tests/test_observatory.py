@@ -218,6 +218,7 @@ def test_server_get_api_and_mutation_rejection_do_not_change_db(tmp_path: Path) 
         assert get_json(base + "/api/observatory/arms")[0]["baseline_kind"] == "abstention"
         assert get_json(base + "/api/observatory/calibration") == []
         assert get_json(base + "/api/observatory/health")["arm_failure_count"] == 1
+        assert get_json(base + "/api/observatory/memecoin-state")["observation_count"] == 0
         for method in ("POST", "PUT", "PATCH", "DELETE"):
             with pytest.raises(HTTPError) as error:
                 urlopen(Request(base + "/api/observatory/summary", method=method), timeout=3)

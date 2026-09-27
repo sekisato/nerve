@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,12 @@ from .lab.models import (
     ObservationSnapshot,
     OutcomeStatus,
     canonical_json,
+)
+from .memestate.models import (
+    FactStatus,
+    MemecoinStateFact,
+    MemecoinStateObservation,
+    StateStatus,
 )
 from .models import Impulse
 
@@ -131,6 +138,38 @@ class NerveStore:
                 message TEXT NOT NULL,
                 details_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS memecoin_state_observations (
+                state_id TEXT PRIMARY KEY,
+                snapshot_id TEXT NOT NULL,
+                state_version TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ready_at TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                state_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                sources_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                FOREIGN KEY(snapshot_id) REFERENCES observation_snapshots(snapshot_id)
+            );
+            CREATE TABLE IF NOT EXISTS memecoin_state_facts (
+                fact_id TEXT PRIMARY KEY,
+                state_id TEXT NOT NULL,
+                field_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                value_kind TEXT,
+                value_num TEXT,
+                value_int TEXT,
+                value_text TEXT,
+                value_bool INTEGER,
+                unit TEXT,
+                source TEXT,
+                source_observed_at TEXT,
+                fetched_at TEXT,
+                age_ms INTEGER,
+                reason TEXT,
+                details_json TEXT NOT NULL,
+                FOREIGN KEY(state_id) REFERENCES memecoin_state_observations(state_id)
+            );
             CREATE INDEX IF NOT EXISTS idx_snapshots_observed
                 ON observation_snapshots(observed_at);
             CREATE INDEX IF NOT EXISTS idx_snapshots_impulse
@@ -147,6 +186,14 @@ class NerveStore:
                 ON measurement_events(recorded_at);
             CREATE INDEX IF NOT EXISTS idx_measurement_events_kind
                 ON measurement_events(kind, recorded_at);
+            CREATE INDEX IF NOT EXISTS idx_memestate_snapshot
+                ON memecoin_state_observations(snapshot_id, ready_at);
+            CREATE INDEX IF NOT EXISTS idx_memestate_ready
+                ON memecoin_state_observations(ready_at);
+            CREATE INDEX IF NOT EXISTS idx_memestate_facts_field
+                ON memecoin_state_facts(field_name, status);
+            CREATE INDEX IF NOT EXISTS idx_memestate_facts_state
+                ON memecoin_state_facts(state_id);
             """
         )
         self._migrate_forward_outcomes()
@@ -337,6 +384,135 @@ class NerveStore:
             ),
         )
         self.conn.commit()
+
+    def record_memecoin_state(self, state: MemecoinStateObservation) -> None:
+        snapshot = self.conn.execute(
+            "SELECT 1 FROM observation_snapshots WHERE snapshot_id=?", (state.snapshot_id,)
+        ).fetchone()
+        if snapshot is None:
+            raise ValueError("memecoin state references an unknown snapshot")
+        self.conn.execute("BEGIN")
+        try:
+            self.conn.execute(
+                """INSERT INTO memecoin_state_observations(
+                       state_id,snapshot_id,state_version,started_at,ready_at,latency_ms,
+                       state_hash,status,sources_json,payload_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    state.state_id,
+                    state.snapshot_id,
+                    state.state_version,
+                    state.started_at.isoformat(),
+                    state.ready_at.isoformat(),
+                    state.latency_ms,
+                    state.state_hash,
+                    state.status.value,
+                    state.sources_json,
+                    state.payload_json,
+                ),
+            )
+            self.conn.executemany(
+                """INSERT INTO memecoin_state_facts(
+                       fact_id,state_id,field_name,status,value_kind,value_num,value_int,
+                       value_text,value_bool,unit,source,source_observed_at,fetched_at,
+                       age_ms,reason,details_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        fact.fact_id,
+                        state.state_id,
+                        fact.field_name,
+                        fact.status.value,
+                        fact.value_kind,
+                        str(fact.value_num) if fact.value_num is not None else None,
+                        str(fact.value_int) if fact.value_int is not None else None,
+                        fact.value_text,
+                        int(fact.value_bool) if fact.value_bool is not None else None,
+                        fact.unit,
+                        fact.source,
+                        fact.source_observed_at.isoformat() if fact.source_observed_at else None,
+                        fact.fetched_at.isoformat() if fact.fetched_at else None,
+                        fact.age_ms,
+                        fact.reason,
+                        fact.details_json,
+                    )
+                    for fact in state.facts
+                ],
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def list_memecoin_states(
+        self, snapshot_id: str | None = None
+    ) -> list[MemecoinStateObservation]:
+        if snapshot_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM memecoin_state_observations ORDER BY ready_at,rowid"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT * FROM memecoin_state_observations WHERE snapshot_id=?
+                   ORDER BY ready_at,rowid""",
+                (snapshot_id,),
+            ).fetchall()
+        return [self._memecoin_state_from_row(row) for row in rows]
+
+    def latest_memecoin_state(self, snapshot_id: str) -> MemecoinStateObservation | None:
+        row = self.conn.execute(
+            """SELECT * FROM memecoin_state_observations
+               WHERE snapshot_id=? AND status IN ('success','partial')
+               ORDER BY ready_at DESC,rowid DESC LIMIT 1""",
+            (snapshot_id,),
+        ).fetchone()
+        return self._memecoin_state_from_row(row) if row is not None else None
+
+    def _memecoin_state_from_row(self, row: sqlite3.Row) -> MemecoinStateObservation:
+        fact_rows = self.conn.execute(
+            "SELECT * FROM memecoin_state_facts WHERE state_id=? ORDER BY rowid",
+            (row["state_id"],),
+        ).fetchall()
+        facts = tuple(
+            MemecoinStateFact(
+                fact_id=str(fact["fact_id"]),
+                field_name=str(fact["field_name"]),
+                status=FactStatus(str(fact["status"])),
+                value_num=(Decimal(str(fact["value_num"])) if fact["value_num"] is not None else None),
+                value_int=(int(str(fact["value_int"])) if fact["value_int"] is not None else None),
+                value_text=(str(fact["value_text"]) if fact["value_text"] is not None else None),
+                value_bool=(bool(fact["value_bool"]) if fact["value_bool"] is not None else None),
+                unit=(str(fact["unit"]) if fact["unit"] is not None else None),
+                source=(str(fact["source"]) if fact["source"] is not None else None),
+                source_observed_at=(
+                    datetime.fromisoformat(str(fact["source_observed_at"]))
+                    if fact["source_observed_at"] is not None
+                    else None
+                ),
+                fetched_at=(
+                    datetime.fromisoformat(str(fact["fetched_at"]))
+                    if fact["fetched_at"] is not None
+                    else None
+                ),
+                age_ms=(int(fact["age_ms"]) if fact["age_ms"] is not None else None),
+                reason=(str(fact["reason"]) if fact["reason"] is not None else None),
+                details_json=str(fact["details_json"]),
+            )
+            for fact in fact_rows
+        )
+        return MemecoinStateObservation(
+            state_id=str(row["state_id"]),
+            snapshot_id=str(row["snapshot_id"]),
+            state_version=str(row["state_version"]),
+            started_at=datetime.fromisoformat(str(row["started_at"])),
+            ready_at=datetime.fromisoformat(str(row["ready_at"])),
+            latency_ms=int(row["latency_ms"]),
+            state_hash=str(row["state_hash"]),
+            status=StateStatus(str(row["status"])),
+            sources_json=str(row["sources_json"]),
+            payload_json=str(row["payload_json"]),
+            facts=facts,
+        )
 
     def get_observation_snapshot(self, snapshot_id: str) -> ObservationSnapshot | None:
         row = self.conn.execute(

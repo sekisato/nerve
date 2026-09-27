@@ -147,6 +147,7 @@ class MeasurementEventKind(StrEnum):
     CAPTURE_FAILED = "capture_failed"
     ARM_FAILED = "arm_failed"
     OUTCOME_FAILED = "outcome_failed"
+    MEMESTATE_FAILED = "memestate_failed"
 
 
 class MeasurementEvent(BaseModel):

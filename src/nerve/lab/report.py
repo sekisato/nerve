@@ -115,6 +115,9 @@ def build_lab_report(store: Any) -> dict[str, Any]:
             "capture_failure_count": sum(item.kind.value == "capture_failed" for item in measurement_events),
             "outcome_failure_count": sum(item.kind.value == "outcome_failed" for item in measurement_events),
             "arm_failure_count": sum(item.kind.value == "arm_failed" for item in measurement_events),
+            "memestate_failure_count": sum(
+                item.kind.value == "memestate_failed" for item in measurement_events
+            ),
         },
         "execution_reality": {
             "observation_count": len(executions),

@@ -49,6 +49,7 @@ class NerveConfig(BaseModel):
     sentinel_simulate_size_usd: Decimal = Decimal("500")
     lp_locker_allowlist: tuple[str, ...] = ()
     indexer_url: str = ""
+    solana_rpc_url: str = ""
 
     risk_per_trade_pct: Decimal = Decimal("0.01")
     max_position_pct: Decimal = Decimal("0.05")
@@ -164,6 +165,7 @@ class NerveConfig(BaseModel):
             sentinel_max_age_blocks=int(os.getenv("SENTINEL_MAX_AGE_BLOCKS", "30")),
             sentinel_simulate_size_usd=Decimal(os.getenv("SENTINEL_SIMULATE_SIZE_USD", "500")),
             lp_locker_allowlist=lockers, indexer_url=os.getenv("INDEXER_URL", ""),
+            solana_rpc_url=os.getenv("SOLANA_RPC_URL", ""),
             risk_per_trade_pct=Decimal(os.getenv("RISK_PER_TRADE_PCT", "0.01")),
             max_position_pct=Decimal(os.getenv("MAX_POSITION_PCT", "0.05")),
             max_positions=int(os.getenv("MAX_POSITIONS", "5")), daily_loss_limit_pct=Decimal(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.03")),
